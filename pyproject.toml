@@ -48,6 +48,7 @@ cerebras = ["openai"]
 deepseek = ["openai"]
 togetherai = ["openai"]
 fireworksai = ["openai"]
+xiaomi = ["openai"]
 
 # Toolkit extras.
 toolkits-web = [

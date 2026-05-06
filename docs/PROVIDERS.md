@@ -30,6 +30,7 @@ pip install "mtpx[cerebras]"
 pip install "mtpx[deepseek]"
 pip install "mtpx[togetherai]"
 pip install "mtpx[fireworksai]"
+pip install "mtpx[xiaomi]"
 ```
 
 Install most provider SDKs at once:
@@ -126,7 +127,7 @@ agent = Agent.MTPAgent(provider=provider, tools=registry)
 
 - Alias names available (when matching optional SDKs are installed):
   - `Groq`, `OpenRouter`, `OpenAI`, `LMStudio`, `Ollama`, `Gemini`, `Anthropic`, `SambaNova`
-  - `Cerebras`, `DeepSeek`, `Mistral`, `Cohere`, `TogetherAI`, `FireworksAI`
+  - `Cerebras`, `DeepSeek`, `Mistral`, `Cohere`, `TogetherAI`, `FireworksAI`, `Xiaomi`
 - Local deterministic planner provider is also available as `MockPlannerProvider` (class alias for `SimplePlannerProvider`).
 - Provider exports are dependency-optional: missing SDKs no longer block importing other providers.
 - Provider symbols are lazily loaded to avoid import-time circular dependencies.
@@ -138,6 +139,7 @@ agent = Agent.MTPAgent(provider=provider, tools=registry)
 Related:
 - [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
 - [Local Inference](C:\Users\prajw\Downloads\MTP\docs\LOCAL_INFERENCE.md)
+- [Xiaomi MiMo Integration](C:\Users\prajw\Downloads\MTP\docs\XIAOMI_MIMO_INTEGRATION.md)
 
 ## Local providers quick reference
 
