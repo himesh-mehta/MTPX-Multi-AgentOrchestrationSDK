@@ -23,6 +23,8 @@ from mtp.providers import (  # noqa: E402
     OpenRouterToolCallingProvider,
     SambaNova,
     SambaNovaToolCallingProvider,
+    Xiaomi,
+    XiaomiToolCallingProvider,
 )
 
 
@@ -36,6 +38,7 @@ class ProviderAliasTests(unittest.TestCase):
         self.assertIs(Gemini, GeminiToolCallingProvider)
         self.assertIs(Anthropic, AnthropicToolCallingProvider)
         self.assertIs(SambaNova, SambaNovaToolCallingProvider)
+        self.assertIs(Xiaomi, XiaomiToolCallingProvider)
 
 
 if __name__ == "__main__":

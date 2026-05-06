@@ -17,6 +17,7 @@ from mtp.providers import (
     OllamaToolCallingProvider,
     OpenRouterToolCallingProvider,
     SambaNovaToolCallingProvider,
+    XiaomiToolCallingProvider,
 )
 
 
@@ -166,6 +167,7 @@ class ProviderAdapterTests(unittest.TestCase):
             OpenRouterToolCallingProvider,
             SambaNovaToolCallingProvider,
             LMStudioToolCallingProvider,
+            XiaomiToolCallingProvider,
         ):
             provider = provider_cls(client=_FakeOpenAIClient())
             action = provider.next_action(messages=[{"role": "user", "content": "go"}], tools=tools)
