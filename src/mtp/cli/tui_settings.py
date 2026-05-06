@@ -18,6 +18,7 @@ DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "deepseek": "deepseek-chat",
     "togetherai": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
     "fireworksai": "accounts/fireworks/models/llama-v3p1-70b-instruct",
+    "xiaomi": "mimo-v2.5-pro",
     "ollama": "llama3.2:3b",  # Popular small model for local inference
     "lmstudio": "qwen3",  # Generic default (user will select from loaded models)
 }
@@ -171,6 +172,8 @@ def get_provider_models(payload: dict[str, Any], provider_name: str) -> list[str
     all_models = []
     if default_model:
         all_models.append(default_model)
+    if provider_name == "xiaomi" and "mimo-v2.5" not in all_models:
+        all_models.append("mimo-v2.5")
     
     for model in custom_models:
         if model not in all_models:

@@ -19,6 +19,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "CohereToolCallingProvider": (".cohere_provider", "CohereToolCallingProvider"),
     "TogetherAIToolCallingProvider": (".together_provider", "TogetherAIToolCallingProvider"),
     "FireworksAIToolCallingProvider": (".fireworks_provider", "FireworksAIToolCallingProvider"),
+    "XiaomiToolCallingProvider": (".xiaomi_provider", "XiaomiToolCallingProvider"),
 }
 
 _ALIASES: dict[str, str] = {
@@ -36,6 +37,7 @@ _ALIASES: dict[str, str] = {
     "Cohere": "CohereToolCallingProvider",
     "TogetherAI": "TogetherAIToolCallingProvider",
     "FireworksAI": "FireworksAIToolCallingProvider",
+    "Xiaomi": "XiaomiToolCallingProvider",
 }
 
 __all__ = sorted([*_EXPORTS.keys(), *_ALIASES.keys()])
