@@ -70,11 +70,17 @@ class PythonToolkit(ToolkitLoader):
             timeout=self.timeout_seconds,
         )
         if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or "Python subprocess failed.")
+            stderr = completed.stderr.strip()
+            if len(stderr) > 10000:
+                stderr = stderr[:10000] + "\n... [STDERR TRUNCATED AT 10000 CHARS]"
+            raise RuntimeError(stderr or "Python subprocess failed.")
         stdout = completed.stdout.strip()
         if not stdout:
             return None
-        return json.loads(stdout.splitlines()[-1])
+        last_line = stdout.splitlines()[-1]
+        if len(last_line) > 50000:
+            return f"<Error: Return value JSON too large ({len(last_line)} bytes). Limit is 50000 bytes.>"
+        return json.loads(last_line)
 
     def list_tool_specs(self) -> list[ToolSpec]:
         return [
