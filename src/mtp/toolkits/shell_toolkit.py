@@ -56,10 +56,19 @@ class ShellToolkit(ToolkitLoader):
                 text=True,
                 timeout=self.timeout_seconds,
             )
+            stdout = completed.stdout.strip()
+            stderr = completed.stderr.strip()
+            max_len = 10000
+            
+            if len(stdout) > max_len:
+                stdout = stdout[:max_len] + f"\n... [STDOUT TRUNCATED AT {max_len} CHARS]"
+            if len(stderr) > max_len:
+                stderr = stderr[:max_len] + f"\n... [STDERR TRUNCATED AT {max_len} CHARS]"
+
             return {
                 "returncode": completed.returncode,
-                "stdout": completed.stdout.strip(),
-                "stderr": completed.stderr.strip(),
+                "stdout": stdout,
+                "stderr": stderr,
             }
 
         return [
