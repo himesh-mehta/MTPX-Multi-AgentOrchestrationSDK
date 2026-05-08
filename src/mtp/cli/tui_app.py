@@ -188,6 +188,14 @@ class MTPApp(App):
         self._history_index = None
         self._history_draft = ""
         
+        # Check if it's a command before applying attachments
+        parsed = parse_slash_command(raw)
+        if parsed is not None:
+            cmd, arg = parsed
+            self._dispatch_command(cmd, arg)
+            # We return early. Attachments remain pending for the next actual prompt.
+            return
+        
         if self._pending_attachments:
             raw = " ".join([f"@{att}" for att in self._pending_attachments]) + " " + raw
             self._pending_attachments.clear()
@@ -200,17 +208,27 @@ class MTPApp(App):
         if not raw:
             return
 
-        parsed = parse_slash_command(raw)
-        if parsed is not None:
-            cmd, arg = parsed
-            self._dispatch_command(cmd, arg)
-            return
-
         self._send_prompt(raw)
 
 
 
     # ── History & Autocomplete ──────────────────────────────────────────────
+
+
+    def on_input_area_remove_last_attachment(self, event) -> None:
+        if hasattr(self, "_pending_attachments") and self._pending_attachments:
+            self._pending_attachments.pop()
+            container = self.query_one("#attachment-container")
+            if container.children:
+                container.children[-1].remove()
+            if not self._pending_attachments:
+                container.remove_class("visible")
+
+    def on_attachment_badge_remove_attachment(self, event) -> None:
+        if hasattr(self, "_pending_attachments") and event.filename in self._pending_attachments:
+            self._pending_attachments.remove(event.filename)
+            if not self._pending_attachments:
+                self.query_one("#attachment-container").remove_class("visible")
 
     def action_hide_suggestions(self) -> None:
         try:
@@ -372,6 +390,9 @@ class MTPApp(App):
 
         spinner.start("Thinking")
 
+        import time
+        self._turn_start_time = time.monotonic()
+
         # Store raw prompt for turn recording
         self._pending_raw_prompt = raw
 
@@ -416,6 +437,10 @@ class MTPApp(App):
                     thinking = uline.replace("thinking=", "").strip()
                     break
 
+            # Calculate elapsed time
+            import time
+            elapsed = time.monotonic() - getattr(self, "_turn_start_time", time.monotonic())
+
             # Render response
             chat_log = self.query_one("#chat-log", ChatLog)
             chat_log.add_assistant_message(ChatMessage(
@@ -426,6 +451,7 @@ class MTPApp(App):
                 warnings=result.warnings,
                 usage_lines=result.usage_lines,
                 thinking=thinking,
+                duration_sec=elapsed,
             ))
 
             self._state.last_tool_events = list(result.tool_events)

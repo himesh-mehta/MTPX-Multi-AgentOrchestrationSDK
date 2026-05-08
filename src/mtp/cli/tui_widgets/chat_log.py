@@ -18,7 +18,7 @@ class ChatMessage:
     """A single chat message for display."""
 
     __slots__ = ("role", "text", "model", "backend", "tool_events",
-                 "warnings", "usage_lines", "timestamp", "thinking")
+                 "warnings", "usage_lines", "timestamp", "thinking", "duration_sec")
 
     def __init__(
         self,
@@ -32,6 +32,7 @@ class ChatMessage:
         usage_lines: list[str] | None = None,
         timestamp: str = "",
         thinking: str = "",
+        duration_sec: float | None = None,
     ):
         self.role = role
         self.text = text
@@ -42,6 +43,7 @@ class ChatMessage:
         self.usage_lines = usage_lines or []
         self.timestamp = timestamp
         self.thinking = thinking
+        self.duration_sec = duration_sec
 
 
 class ChatLog(RichLog):
@@ -124,7 +126,7 @@ class ChatLog(RichLog):
         # ── Usage metrics ────────────────────────────────────────
         if msg.usage_lines:
             self.write(Text(""))
-            self._render_usage(msg.usage_lines)
+            self._render_usage(msg.usage_lines, msg.duration_sec)
 
         self.write(Text(""))  # spacer
 
@@ -186,7 +188,7 @@ class ChatLog(RichLog):
             more.append("(Ctrl+T to expand)", style="dim italic #818cf8")
             self.write(more)
 
-    def _render_usage(self, lines: list[str]) -> None:
+    def _render_usage(self, lines: list[str], duration_sec: float | None = None) -> None:
         """Render compact usage metrics."""
         metrics: list[str] = []
         for line in lines:
@@ -203,7 +205,7 @@ class ChatLog(RichLog):
             if match:
                 used = int(match.group(1).replace(",", ""))
                 total = int(match.group(2).replace(",", ""))
-                self._render_context_bar(used, total)
+                self._render_context_bar(used, total, duration_sec)
                 break
 
         # Compact metrics
@@ -212,7 +214,7 @@ class ChatLog(RichLog):
             usage_text = Text(f"  {compact}", style="dim #71717a")
             self.write(usage_text)
 
-    def _render_context_bar(self, used: int, total: int) -> None:
+    def _render_context_bar(self, used: int, total: int, duration_sec: float | None = None) -> None:
         """Render a gradient context window usage bar."""
         bar_w = 20
         pct = min(1.0, used / max(1, total))
@@ -231,4 +233,6 @@ class ChatLog(RichLog):
         bar.append("▱" * empty, style="dim #3f3f46")
         bar.append(f" {pct*100:.0f}% ", style=color)
         bar.append(f"{used:,} / {total:,} tokens", style="dim #71717a")
+        if duration_sec is not None:
+            bar.append(f"  ⏱ {duration_sec:.1f}s", style="dim #38bdf8")
         self.write(bar)
