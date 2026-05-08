@@ -90,7 +90,7 @@ def _match_rules(rules: dict[str, str], subject: str, default: str) -> str:
 
 
 def _tool_group(tool_name: str) -> str:
-    if tool_name.startswith(("fs.", "project.", "agent.explore", "agent.debug_context")):
+    if tool_name.startswith(("fs.", "project.", "agent.explore", "agent.debug_context", "agent.syntax_check")):
         return "read"
     if tool_name.startswith("edit."):
         return "edit"
