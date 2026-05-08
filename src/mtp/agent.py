@@ -554,6 +554,32 @@ class Agent:
             return content.strip()
         return None
 
+    def _trim_cacheable_repeated_tool_calls(
+        self,
+        plan: ExecutionPlan,
+        seen: set[tuple[str, str]] | None = None,
+    ) -> ExecutionPlan:
+        tool_names = [call.name for batch in plan.batches for call in batch.calls]
+        self.registry.ensure_tools_available(tool_names)
+        specs = {spec.name: spec for spec in self.registry.list_tools()}
+        seen_keys = seen if seen is not None else set()
+        batches = []
+        for batch in plan.batches:
+            calls = []
+            for call in batch.calls:
+                spec = specs.get(call.name)
+                if spec is None or spec.cache_ttl_seconds <= 0:
+                    calls.append(call)
+                    continue
+                key = (call.name, json.dumps(call.arguments, sort_keys=True, separators=(",", ":"), default=str))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                calls.append(call)
+            if calls:
+                batches.append(type(batch)(mode=batch.mode, calls=calls))
+        return ExecutionPlan(batches=batches)
+
     def _parse_and_validate_output(
         self,
         final_text: str,
@@ -1836,6 +1862,7 @@ class Agent:
         last_results: list[ToolResult] = []
         total_tool_calls = 0
         current_round = 0
+        seen_cacheable_tool_calls: set[tuple[str, str]] = set()
         try:
             for round_idx in range(1, max_rounds + 1):
                 current_round = round_idx
@@ -1951,6 +1978,25 @@ class Agent:
                             }
                         )
                         continue
+
+                plan_before_trim = sum(len(batch.calls) for batch in action.plan.batches)
+                action.plan = self._trim_cacheable_repeated_tool_calls(action.plan, seen_cacheable_tool_calls)
+                plan_after_trim = sum(len(batch.calls) for batch in action.plan.batches)
+                if plan_after_trim < plan_before_trim:
+                    yield events.emit(
+                        "tool_plan_trimmed",
+                        round=round_idx,
+                        removed=plan_before_trim - plan_after_trim,
+                        remaining=plan_after_trim,
+                    )
+                if plan_after_trim == 0:
+                    self._append_message(
+                        {
+                            "role": "system",
+                            "content": "All proposed tool calls repeated cached work. Use the available tool results and respond.",
+                        }
+                    )
+                    continue
 
                 assistant_tool_message = action.metadata.get("assistant_tool_message")
                 if isinstance(assistant_tool_message, dict):
@@ -2196,6 +2242,7 @@ class Agent:
         last_results: list[ToolResult] = []
         total_tool_calls = 0
         current_round = 0
+        seen_cacheable_tool_calls: set[tuple[str, str]] = set()
         try:
             for round_idx in range(1, max_rounds + 1):
                 current_round = round_idx
@@ -2311,6 +2358,25 @@ class Agent:
                             }
                         )
                         continue
+
+                plan_before_trim = sum(len(batch.calls) for batch in action.plan.batches)
+                action.plan = self._trim_cacheable_repeated_tool_calls(action.plan, seen_cacheable_tool_calls)
+                plan_after_trim = sum(len(batch.calls) for batch in action.plan.batches)
+                if plan_after_trim < plan_before_trim:
+                    yield events.emit(
+                        "tool_plan_trimmed",
+                        round=round_idx,
+                        removed=plan_before_trim - plan_after_trim,
+                        remaining=plan_after_trim,
+                    )
+                if plan_after_trim == 0:
+                    self._append_message(
+                        {
+                            "role": "system",
+                            "content": "All proposed tool calls repeated cached work. Use the available tool results and respond.",
+                        }
+                    )
+                    continue
 
                 assistant_tool_message = action.metadata.get("assistant_tool_message")
                 if isinstance(assistant_tool_message, dict):

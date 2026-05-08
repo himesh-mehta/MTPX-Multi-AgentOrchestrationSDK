@@ -1910,6 +1910,11 @@ def _run_mtp_prompt(state: TUIState, prompt: str, spinner: _Spinner | None = Non
                     sys.stdout.write(f"{RESET}\n")
                     mode_state["current_mode"] = None
                 
+                # Stop any existing active tool spinner before creating a new one
+                if "active_tool_spinner" in mode_state and mode_state["active_tool_spinner"]:
+                    mode_state["active_tool_spinner"].stop()
+                    mode_state["active_tool_spinner"] = None
+                
                 clean_msg = message.replace("🔧 ", "")
                 # Create an active spinner for the tool
                 from . import tui
@@ -3066,7 +3071,20 @@ class _Spinner:
             color = spin_colors[idx % len(spin_colors)]
             elapsed = time.monotonic() - self._start_time
             elapsed_str = f" {C_DIM}{elapsed:.1f}s{RESET}"
-            sys.stdout.write(f"\r  {color}{frame}{RESET} {C_ACCENT_DIM}{self._label}...{RESET}{elapsed_str}")
+            
+            # Calculate available width for label to prevent line wrapping
+            term_width = _get_term_width()
+            # Reserve space for: "  " (2) + frame (1) + " " (1) + "..." (3) + elapsed_str (~8) + safety margin (10)
+            max_label_width = max(40, term_width - 25)
+            
+            # Truncate label if needed (strip ANSI codes for accurate length calculation)
+            label_stripped = _strip_ansi(self._label)
+            if len(label_stripped) > max_label_width:
+                label = label_stripped[:max_label_width - 3] + "..."
+            else:
+                label = self._label
+            
+            sys.stdout.write(f"\r  {color}{frame}{RESET} {C_ACCENT_DIM}{label}...{RESET}{elapsed_str}")
             sys.stdout.flush()
             idx += 1
             time.sleep(self._delay)
