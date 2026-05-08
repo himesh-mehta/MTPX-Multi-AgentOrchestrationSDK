@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
+from textual.widgets import OptionList
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.worker import Worker, WorkerState
@@ -21,7 +22,7 @@ from .tui_state import (
     MODEL_PRESETS, REASONING_SHORTCUTS,
 )
 from .tui_widgets.chat_log import ChatLog, ChatMessage
-from .tui_widgets.input_area import InputPanel, InputArea, PromptLabel
+from .tui_widgets.input_area import InputPanel, InputArea, PromptLabel, AttachmentBadge
 from .tui_widgets.status_bar import StatusBar
 from .tui_widgets.sidebar import Sidebar, SessionInfo, ToolEventLog
 from .tui_widgets.spinner_widget import SpinnerWidget
@@ -47,12 +48,16 @@ class MTPApp(App):
         Binding("ctrl+l", "clear_chat", "Clear", show=False, priority=True),
         Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+w", "cycle_sandbox", "Sandbox", show=False, priority=True),
+        Binding("escape", "hide_suggestions", "Hide Suggestions", show=False),
     ]
 
     def __init__(self, state: TUIState, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._state = state
-        self._pending_raw_prompt: str = ""  # Track the raw prompt for recording
+        self._pending_raw_prompt: str = ""
+        self._history_index: int | None = None
+        self._history_draft: str = ""
+        self._pending_attachments: list[str] = []  # Track the raw prompt for recording
 
     @property
     def state(self) -> TUIState:
@@ -180,6 +185,18 @@ class MTPApp(App):
 
     def on_input_area_submitted(self, event: InputArea.Submitted) -> None:
         raw = event.value.strip()
+        self._history_index = None
+        self._history_draft = ""
+        
+        if self._pending_attachments:
+            raw = " ".join([f"@{att}" for att in self._pending_attachments]) + " " + raw
+            self._pending_attachments.clear()
+            container = self.query_one("#attachment-container")
+            for child in container.children:
+                child.remove()
+            container.remove_class("visible")
+            
+        raw = raw.strip()
         if not raw:
             return
 
@@ -190,6 +207,153 @@ class MTPApp(App):
             return
 
         self._send_prompt(raw)
+
+
+
+    # ── History & Autocomplete ──────────────────────────────────────────────
+
+    def action_hide_suggestions(self) -> None:
+        try:
+            option_list = self.query_one("#suggestion-list", OptionList)
+            if option_list.has_class("visible"):
+                option_list.remove_class("visible")
+                self.query_one("#chat-input", InputArea).focus()
+        except Exception:
+            pass
+
+    def on_input_area_history_navigate(self, event: InputArea.HistoryNavigate) -> None:
+        turns = self._state.transcript
+        if not turns:
+            return
+        
+        input_area = self.query_one("#chat-input", InputArea)
+        
+        if self._history_index is None:
+            if event.direction == -1:
+                self._history_index = len(turns) - 1
+                self._history_draft = input_area.text
+            else:
+                return
+        else:
+            self._history_index += event.direction
+            
+        if self._history_index < 0:
+            self._history_index = 0
+        elif self._history_index >= len(turns):
+            self._history_index = None
+            input_area.text = self._history_draft
+            # Textual TextArea cursor location requires row, col
+            lines = input_area.text.split("\n")
+            input_area.cursor_location = (len(lines) - 1, len(lines[-1]))
+            return
+            
+        input_area.text = turns[self._history_index].prompt
+        if event.direction == -1:
+            input_area.cursor_location = (0, 0)
+        else:
+            lines = input_area.text.split("\n")
+            input_area.cursor_location = (len(lines) - 1, len(lines[-1]))
+
+    def on_input_area_tab_pressed(self, event: InputArea.TabPressed) -> None:
+        input_area = self.query_one("#chat-input", InputArea)
+        cursor_row, cursor_col = input_area.cursor_location
+        lines = input_area.text.split("\n")
+        current_line = lines[cursor_row][:cursor_col]
+        words = current_line.split()
+        if not words:
+            return
+            
+        last_word = words[-1]
+        if last_word.startswith("@"):
+            partial = last_word[1:]
+            self._show_file_suggestions(partial)
+        elif last_word.startswith("/"):
+            partial = last_word
+            self._show_command_suggestions(partial)
+
+    def _show_file_suggestions(self, partial: str) -> None:
+        import os
+        from pathlib import Path
+        cwd = self._state.cwd
+        matches = []
+        try:
+            for root, dirs, files in os.walk(cwd):
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d not in {"__pycache__", "node_modules", "venv", ".venv", ".git"}]
+                rel_root = Path(root).relative_to(cwd)
+                if str(rel_root) == ".":
+                    rel_root = Path("")
+                for f in files:
+                    if f.startswith("."): continue
+                    rel_path = (rel_root / f).as_posix()
+                    if partial.lower() in rel_path.lower():
+                        matches.append(rel_path)
+                if len(rel_root.parts) >= 2:
+                    dirs.clear()
+        except Exception:
+            pass
+            
+        matches.sort()
+        matches = matches[:20]
+        if not matches:
+            return
+            
+        self._populate_and_show_suggestions(matches, prefix="@")
+
+    def _show_command_suggestions(self, partial: str) -> None:
+        from .tui_completers import CommandCompleter
+        completer = CommandCompleter()
+        cmds = completer._COMMANDS
+        matches = [cmd for cmd in cmds if cmd.startswith(partial.lower())]
+        if not matches:
+            return
+        self._populate_and_show_suggestions(matches, prefix="")
+
+    def _populate_and_show_suggestions(self, matches: list[str], prefix: str) -> None:
+        option_list = self.query_one("#suggestion-list", OptionList)
+        option_list.clear_options()
+        for m in matches:
+            option_list.add_option(f"{prefix}{m}")
+        
+        option_list.add_class("visible")
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_list = event.option_list
+        option_list.remove_class("visible")
+        selected = str(event.option.prompt)
+        
+        input_area = self.query_one("#chat-input", InputArea)
+        input_area.focus()
+        
+        cursor_row, cursor_col = input_area.cursor_location
+        lines = input_area.text.split("\n")
+        current_line = lines[cursor_row][:cursor_col]
+        words = current_line.split()
+        if not words:
+            return
+            
+        last_word = words[-1]
+        
+        if selected.startswith("@"):
+            start_idx = current_line.rfind(last_word)
+            new_line = current_line[:start_idx]
+            lines[cursor_row] = new_line + lines[cursor_row][cursor_col:]
+            input_area.text = "\n".join(lines)
+            input_area.cursor_location = (cursor_row, start_idx)
+            
+            filename = selected[1:]
+            if filename not in self._pending_attachments:
+                self._pending_attachments.append(filename)
+                from .tui_widgets.input_area import AttachmentBadge
+                container = self.query_one("#attachment-container")
+                container.mount(AttachmentBadge(f"📎 {filename}"))
+                container.add_class("visible")
+        else:
+            start_idx = current_line.rfind(last_word)
+            new_line = current_line[:start_idx] + selected + " "
+            lines[cursor_row] = new_line + lines[cursor_row][cursor_col:]
+            input_area.text = "\n".join(lines)
+            input_area.cursor_location = (cursor_row, start_idx + len(selected) + 1)
 
     def _send_prompt(self, raw: str) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)

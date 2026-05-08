@@ -42,7 +42,7 @@ Screen {
     layout: vertical;
 }
 
-#chat-area {
+#chat-log {
     width: 1fr;
     height: 1fr;
 }
@@ -93,6 +93,37 @@ InputArea {
 
 InputArea:focus {
     border: round $accent 50%;
+}
+
+#suggestion-list {
+    height: auto;
+    max-height: 6;
+    display: none;
+    border: tall $brand;
+    background: $surface-1;
+}
+
+#suggestion-list.visible {
+    display: block;
+}
+
+#attachment-container {
+    height: auto;
+    display: none;
+    padding: 0 1;
+}
+
+#attachment-container.visible {
+    display: block;
+}
+
+AttachmentBadge {
+    background: $surface-1;
+    border: tall $accent;
+    color: $text;
+    padding: 0 1;
+    margin-right: 1;
+    height: 3;
 }
 
 
