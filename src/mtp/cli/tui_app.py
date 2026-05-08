@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
-from textual.widgets import OptionList
+from textual.widgets import OptionList, RichLog
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.worker import Worker, WorkerState
@@ -48,6 +48,7 @@ class MTPApp(App):
         Binding("ctrl+l", "clear_chat", "Clear", show=False, priority=True),
         Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+w", "cycle_sandbox", "Sandbox", show=False, priority=True),
+        Binding("ctrl+y", "copy_last", "Copy Output", show=True, priority=True),
         Binding("escape", "hide_suggestions", "Hide Suggestions", show=False),
     ]
 
@@ -58,6 +59,7 @@ class MTPApp(App):
         self._history_index: int | None = None
         self._history_draft: str = ""
         self._pending_attachments: list[str] = []  # Track the raw prompt for recording
+        self._input_history: list[str] = []
 
     @property
     def state(self) -> TUIState:
@@ -71,6 +73,7 @@ class MTPApp(App):
                 yield BootScreen(id="boot-screen")
                 yield ChatLog(id="chat-log")
                 yield SpinnerWidget(id="spinner")
+                yield RichLog(id="cmd-log", markup=True, highlight=True, wrap=True)
                 yield InputPanel(id="input-panel")
             yield Sidebar(id="sidebar")
         yield StatusBar(id="status-bar")
@@ -125,6 +128,9 @@ class MTPApp(App):
             welcome.append(" to attach  ·  ", style="#71717a")
             welcome.append("/help", style="#818cf8")
             welcome.append(" for commands\n", style="#71717a")
+            welcome.append("  │  ", style="#3f3f46")
+            welcome.append("Tip:", style="italic #f472b6")
+            welcome.append(" Shift+Mouse to copy  ·  Ctrl+Y to copy last response\n", style="#71717a")
             welcome.append("  │  ", style="#3f3f46")
             model = active_model_name(self._state)
             welcome.append(f"{self._state.backend}", style="#34d399")
@@ -188,6 +194,15 @@ class MTPApp(App):
         self._history_index = None
         self._history_draft = ""
         
+        if raw and (not self._input_history or self._input_history[-1] != raw):
+            self._input_history.append(raw)
+            
+        try:
+            cmd_log = self.query_one("#cmd-log", RichLog)
+            cmd_log.remove_class("visible")
+        except Exception:
+            pass
+        
         # Check if it's a command before applying attachments
         parsed = parse_slash_command(raw)
         if parsed is not None:
@@ -240,7 +255,7 @@ class MTPApp(App):
             pass
 
     def on_input_area_history_navigate(self, event: InputArea.HistoryNavigate) -> None:
-        turns = self._state.transcript
+        turns = self._input_history
         if not turns:
             return
         
@@ -265,12 +280,46 @@ class MTPApp(App):
             input_area.cursor_location = (len(lines) - 1, len(lines[-1]))
             return
             
-        input_area.text = turns[self._history_index].prompt
+        input_area.text = turns[self._history_index]
         if event.direction == -1:
             input_area.cursor_location = (0, 0)
         else:
             lines = input_area.text.split("\n")
             input_area.cursor_location = (len(lines) - 1, len(lines[-1]))
+
+    def on_input_area_changed(self, event: InputArea.Changed) -> None:
+        input_area = event.text_area
+        cursor_row, cursor_col = input_area.cursor_location
+        lines = input_area.text.split("\n")
+        if cursor_row >= len(lines):
+            return
+            
+        current_line = lines[cursor_row][:cursor_col]
+        words = current_line.split()
+        
+        if not words or not current_line.endswith(words[-1]):
+            try:
+                self.query_one("#suggestion-list", OptionList).remove_class("visible")
+            except Exception: pass
+            return
+            
+        last_word = words[-1]
+        
+        if last_word.startswith("/"):
+            self._show_command_suggestions(last_word)
+        elif last_word.startswith("@"):
+            self._show_file_suggestions(last_word[1:])
+        elif len(words) == 1 and len(last_word) >= 1:
+            matches = [h for h in self._input_history if h.startswith(last_word) and h != last_word]
+            matches = list(dict.fromkeys(matches))[:10]
+            if matches:
+                self._populate_and_show_suggestions(matches, prefix="")
+            else:
+                try: self.query_one("#suggestion-list", OptionList).remove_class("visible")
+                except Exception: pass
+        else:
+            try: self.query_one("#suggestion-list", OptionList).remove_class("visible")
+            except Exception: pass
 
     def on_input_area_tab_pressed(self, event: InputArea.TabPressed) -> None:
         input_area = self.query_one("#chat-input", InputArea)
@@ -313,6 +362,8 @@ class MTPApp(App):
         matches.sort()
         matches = matches[:20]
         if not matches:
+            try: self.query_one("#suggestion-list", OptionList).remove_class("visible")
+            except Exception: pass
             return
             
         self._populate_and_show_suggestions(matches, prefix="@")
@@ -323,6 +374,8 @@ class MTPApp(App):
         cmds = completer._COMMANDS
         matches = [cmd for cmd in cmds if cmd.startswith(partial.lower())]
         if not matches:
+            try: self.query_one("#suggestion-list", OptionList).remove_class("visible")
+            except Exception: pass
             return
         self._populate_and_show_suggestions(matches, prefix="")
 
@@ -477,17 +530,54 @@ class MTPApp(App):
         """Central action handler called by CommandPalette entries."""
         self._dispatch_command(cmd, arg)
 
+    def action_copy_last(self) -> None:
+        """Copy the last assistant response to clipboard."""
+        turns = self._state.transcript
+        if turns:
+            last_resp = turns[-1].response
+            try:
+                self.copy_to_clipboard(last_resp)
+                self.notify("Copied last response to clipboard!", title="Copied", severity="information")
+            except Exception as e:
+                self.notify(f"Copy failed: {e}", title="Error", severity="error")
+        else:
+            self.notify("No response to copy.", severity="warning")
+
     def _dispatch_command(self, cmd: str, arg: str) -> None:
         """Route a command name + argument to the appropriate handler."""
-        chat_log = self.query_one("#chat-log", ChatLog)
+        cmd_log = self.query_one("#cmd-log", RichLog)
+        cmd_log.clear()
+        cmd_log.add_class("visible")
         s = self._state
+
+        class CmdLogProxy:
+            def add_system_message(self, content, style="dim #71717a"):
+                from rich.text import Text
+                if isinstance(content, str):
+                    import re
+                    cleaned = re.sub(r"\033\[[0-9;]*m", "", content)
+                    cmd_log.write(Text(f"  {cleaned}", style=style))
+                else:
+                    cmd_log.write(content)
+                    
+            def add_command_result(self, content):
+                from rich.text import Text
+                if isinstance(content, str):
+                    import re
+                    cleaned = re.sub(r"\033\[[0-9;]*m", "", content)
+                    cmd_log.write(Text(f"  {cleaned}", style="#a78bfa"))
+                else:
+                    cmd_log.write(content)
+
+        chat_log = CmdLogProxy()
 
         if cmd == "help":
             chat_log.add_system_message(self._build_help_text())
         elif cmd == "exit":
             self.exit()
         elif cmd == "clear":
-            chat_log.clear()
+            self.query_one("#chat-log", ChatLog).clear()
+            cmd_log.remove_class("visible")
         elif cmd == "status":
             chat_log.add_system_message(self._build_status_text())
         elif cmd == "sessions":
@@ -679,57 +769,67 @@ class MTPApp(App):
 
     # ── Text builders ────────────────────────────────────────────────────
 
-    def _build_help_text(self) -> str:
-        return (
-            "━━━ Command Reference ━━━\n\n"
-            "Navigation\n"
-            "  /help         Show this reference\n"
-            "  /exit         Quit TUI\n"
-            "  /clear        Clear chat log\n"
-            "  /status       Show session state\n"
-            "  /new [label]  Start fresh session\n"
-            "  /load <id>    Load saved session\n"
-            "  /sessions     List saved sessions\n"
-            "  /history [n]  Show recent turns\n"
-            "  /tools        Show last tool events\n\n"
-            "Backend & Model\n"
-            "  /backend <p>  Switch provider\n"
-            "  /model <name> Switch model\n"
-            "  /models       Show all models\n"
-            "  /apikey       Manage API keys\n"
-            "  /reasoning <level>  Set reasoning\n"
-            "  /mode <mode>  Set harness mode\n"
-            "  /rounds <n>   Set max rounds\n"
-            "  /sandbox      Cycle sandbox mode\n\n"
-            "Keys\n"
-            "  Ctrl+P  Command palette\n"
-            "  Ctrl+B  Toggle sidebar\n"
-            "  Ctrl+L  Clear screen\n"
-            "  Ctrl+D  Quit\n"
-            "  Ctrl+W  Cycle sandbox\n\n"
-            "Prompt: @path/to/file to attach context"
-        )
+    def _build_help_text(self) -> Any:
+        from rich.table import Table
+        from rich.panel import Panel
+        
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Category", style="bold #c084fc", justify="right")
+        table.add_column("Command", style="bold #38bdf8")
+        table.add_column("Description", style="#71717a")
+        
+        table.add_row("Navigation", "/help", "Show this reference")
+        table.add_row("", "/exit", "Quit TUI")
+        table.add_row("", "/clear", "Clear chat log")
+        table.add_row("", "/status", "Show session state")
+        table.add_row("", "/sessions", "List saved sessions")
+        table.add_row("", "/history", "Show recent turns")
+        table.add_row("", "/tools", "Show last tool events")
+        
+        table.add_row("Backend & Model", "/backend <p>", "Switch provider")
+        table.add_row("", "/model <name>", "Switch model")
+        table.add_row("", "/models", "Show all models")
+        table.add_row("", "/apikey", "Manage API keys")
+        table.add_row("", "/reasoning", "Set reasoning level")
+        table.add_row("", "/mode", "Set harness mode")
+        table.add_row("", "/sandbox", "Cycle sandbox mode")
+        
+        table.add_row("Keys", "Ctrl+P", "Command palette")
+        table.add_row("", "Ctrl+B", "Toggle sidebar")
+        table.add_row("", "Ctrl+L", "Clear screen")
+        table.add_row("", "Ctrl+Y", "Copy last response")
+        
+        return Panel(table, title="[bold #ec4899]Command Reference[/]", border_style="#3f3f46")
 
-    def _build_status_text(self) -> str:
+    def _build_status_text(self) -> Any:
+        from rich.table import Table
+        from rich.panel import Panel
         s = self._state
-        return (
-            f"━━━ Session Status ━━━\n"
-            f"  session    {s.session_id}\n"
-            f"  label      {s.session_label or '(none)'}\n"
-            f"  backend    {s.backend}\n"
-            f"  model      {active_model_name(s)}\n"
-            f"  mode       {s.harness_mode}\n"
-            f"  reasoning  {s.reasoning_effort}\n"
-            f"  sandbox    {s.codex_sandbox_mode}\n"
-            f"  rounds     {s.max_rounds}\n"
-            f"  cwd        {s.cwd}\n"
-            f"  turns      {len(s.transcript)}\n"
-            f"  autoresearch {s.autoresearch}"
-        )
+        
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Key", style="bold #38bdf8")
+        table.add_column("Value", style="#f4f4f6")
+        
+        table.add_row("session", s.session_id)
+        table.add_row("label", s.session_label or "(none)")
+        table.add_row("backend", s.backend)
+        table.add_row("model", active_model_name(s))
+        table.add_row("mode", s.harness_mode)
+        table.add_row("reasoning", str(s.reasoning_effort))
+        table.add_row("sandbox", s.codex_sandbox_mode)
+        table.add_row("rounds", str(s.max_rounds))
+        table.add_row("cwd", str(s.cwd))
+        table.add_row("turns", str(len(s.transcript)))
+        table.add_row("autoresearch", str(s.autoresearch))
+        
+        return Panel(table, title="[bold #34d399]Session Status[/]", border_style="#3f3f46")
 
-    def _build_sessions_text(self) -> str:
+    def _build_sessions_text(self) -> Any:
         import json
         from mtp import SessionRecord
+        from rich.table import Table
+        from rich.panel import Panel
+        
         sessions: list[SessionRecord] = []
         try:
             if self._state.session_store.file_path.exists():
@@ -743,66 +843,111 @@ class MTPApp(App):
             sessions.sort(key=lambda x: x.updated_at, reverse=True)
         except Exception:
             return "No saved sessions."
+            
         if not sessions:
             return "No saved sessions."
-        lines = ["━━━ Saved Sessions ━━━"]
+            
+        table = Table(show_header=True, header_style="bold #c084fc", box=None, padding=(0, 2))
+        table.add_column("ID", style="#38bdf8")
+        table.add_column("Label", style="#f4f4f6")
+        table.add_column("Turns", justify="right", style="#71717a")
+        table.add_column("Status", style="#34d399")
+        
         for rec in sessions[:15]:
             tui = rec.metadata.get("tui", {}) if isinstance(rec.metadata, dict) else {}
             tui = tui if isinstance(tui, dict) else {}
             label = tui.get("session_label", "(unnamed)")
-            turns = tui.get("turn_count", 0)
+            turns = str(tui.get("turn_count", 0))
             sid = rec.session_id.split("-")[-1][:8]
-            active = " ● ACTIVE" if rec.session_id == self._state.session_id else ""
-            lines.append(f"  {sid}  {label}  ({turns} turns){active}")
-        return "\n".join(lines)
+            active = "● ACTIVE" if rec.session_id == self._state.session_id else ""
+            table.add_row(sid, label, turns, active)
+            
+        return Panel(table, title="[bold #fbbf24]Saved Sessions[/]", border_style="#3f3f46")
 
-    def _build_history_text(self, limit: int | None = None) -> str:
+    def _build_history_text(self, limit: int | None = None) -> Any:
+        from rich.panel import Panel
+        from rich.text import Text
+        
         turns = self._state.transcript[-limit:] if limit else self._state.transcript
         if not turns:
             return "No turns yet."
-        lines = ["━━━ Chat History ━━━"]
+            
+        group = []
         for i, t in enumerate(turns, 1):
             p = t.prompt.replace("\n", " ")[:80]
             r = t.response.replace("\n", " ")[:80]
-            lines.append(f"  #{i} {t.created_at} · {t.backend}")
-            lines.append(f"    ❯ {p}")
-            lines.append(f"    ◂ {r}")
-        return "\n".join(lines)
+            text = Text()
+            text.append(f"#{i} {t.created_at} · {t.backend}\n", style="bold #c084fc")
+            text.append(f"  ❯ {p}\n", style="#ec4899")
+            text.append(f"  ◂ {r}\n", style="#8b5cf6")
+            group.append(text)
+            
+        from rich.console import Group
+        return Panel(Group(*group), title="[bold #f472b6]Chat History[/]", border_style="#3f3f46")
 
-    def _build_models_text(self) -> str:
-        lines = ["━━━ Available Models ━━━\n", "Codex Models:"]
+    def _build_models_text(self) -> Any:
+        from rich.table import Table
+        from rich.panel import Panel
+        from rich.text import Text
+        
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Active", style="bold #34d399")
+        table.add_column("Num", style="#71717a")
+        table.add_column("Model", style="bold #fbbf24")
+        table.add_column("Description", style="#f4f4f6")
+        
         for i, (m, d) in enumerate(MODEL_PRESETS, 1):
             active = "●" if m == self._state.codex_model else "○"
-            lines.append(f"  {active} [{i}] {m}  {d}")
-        lines.append(f"\nReasoning: {self._state.reasoning_effort}")
-        lines.append(
-            "Levels: " + " ".join(f"[{k}]={v}" for k, v in REASONING_SHORTCUTS.items())
-        )
-        lines.append(f"\nUsage: /model <name>  or  /model add <provider> <name>")
-        return "\n".join(lines)
+            table.add_row(active, f"[{i}]", m, d)
+            
+        text = Text("\nReasoning: ", style="bold #c084fc")
+        text.append(f"{self._state.reasoning_effort}\n", style="#38bdf8")
+        text.append("Levels: " + " ".join(f"[{k}]={v}" for k, v in REASONING_SHORTCUTS.items()), style="#71717a")
+        text.append("\n\nUsage: /model <name>  or  /model add <provider> <name>", style="italic #71717a")
+        
+        from rich.console import Group
+        return Panel(Group(table, text), title="[bold #818cf8]Available Models[/]", border_style="#3f3f46")
 
-    def _build_tools_text(self) -> str:
+    def _build_tools_text(self) -> Any:
+        from rich.panel import Panel
+        from rich.text import Text
+        
         if not self._state.last_tool_events:
             return "No tool events from last turn."
-        lines = [f"━━━ Tool Events ({len(self._state.last_tool_events)}) ━━━"]
+            
+        group = []
+        text = Text()
         for e in self._state.last_tool_events:
-            lines.append(f"  ├─ {e}")
+            text.append(f"  ├─ {e}\n", style="#2dd4bf")
+        group.append(text)
+        
         if self._state.last_warnings:
-            lines.append(f"\nWarnings ({len(self._state.last_warnings)}):")
+            w_text = Text(f"\nWarnings ({len(self._state.last_warnings)}):\n", style="bold #fbbf24")
             for w in self._state.last_warnings:
-                lines.append(f"  ⚠ {w}")
-        return "\n".join(lines)
+                w_text.append(f"  ⚠ {w}\n", style="#fbbf24")
+            group.append(w_text)
+            
+        from rich.console import Group
+        return Panel(Group(*group), title=f"[bold #a78bfa]Tool Events ({len(self._state.last_tool_events)})[/]", border_style="#3f3f46")
 
-    def _build_providers_text(self) -> str:
+    def _build_providers_text(self) -> Any:
+        from rich.table import Table
+        from rich.panel import Panel
         from .tui_provider_factory import SUPPORTED_TUI_PROVIDERS
-        lines = ["━━━ Available Providers ━━━"]
+        
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Active", style="bold #34d399")
+        table.add_column("Provider", style="bold #38bdf8")
+        
         active = self._state.backend
-        lines.append(f"  {'●' if active == 'codex' else '○'} codex")
+        table.add_row("●" if active == "codex" else "○", "codex")
         for p in sorted(SUPPORTED_TUI_PROVIDERS):
-            marker = "●" if p == active else "○"
-            lines.append(f"  {marker} {p}")
-        lines.append(f"\nUsage: /backend <provider>")
-        return "\n".join(lines)
+            table.add_row("●" if active == p else "○", p)
+            
+        from rich.text import Text
+        text = Text("\nUsage: /backend <provider>", style="italic #71717a")
+        from rich.console import Group
+        return Panel(Group(table, text), title="[bold #ec4899]Available Providers[/]", border_style="#3f3f46")
 
     # ── Action bindings ──────────────────────────────────────────────────
 

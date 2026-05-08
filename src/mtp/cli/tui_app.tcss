@@ -47,6 +47,20 @@ Screen {
     height: 1fr;
 }
 
+#cmd-log {
+    height: auto;
+    max-height: 20;
+    display: none;
+    background: $surface-1;
+    border: tall $brand;
+    padding: 1 2;
+    margin: 0 1 1 1;
+}
+
+#cmd-log.visible {
+    display: block;
+}
+
 
 /* ── Chat Log ───────────────────────────────────────────────────────────── */
 
