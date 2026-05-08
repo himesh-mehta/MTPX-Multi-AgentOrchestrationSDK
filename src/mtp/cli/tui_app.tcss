@@ -1,0 +1,219 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   MTP TUI — Synthwave / Cyberpunk Textual CSS Theme
+   24-bit TrueColor (ANSI RGB) · Unicode Box-Drawing · Nerd Font Ready
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Design Tokens ──────────────────────────────────────────────────────── */
+
+$brand:         rgb(192, 132, 252);   /* Neon Purple — primary brand       */
+$accent:        rgb(56, 189, 248);    /* Electric Neon Cyan — accent       */
+$accent-dim:    rgb(14, 116, 144);    /* Muted Cyan                        */
+$success:       rgb(52, 211, 153);    /* Mint Green — success/active       */
+$warning:       rgb(251, 191, 36);    /* Radiant Amber — warnings          */
+$error:         rgb(244, 63, 94);     /* Neon Rose — errors                */
+$surface:       rgb(12, 12, 14);      /* Deep Black — background           */
+$surface-1:     rgb(24, 24, 27);      /* Zinc 900 — elevated surface       */
+$surface-2:     rgb(39, 39, 42);      /* Zinc 800 — cards/panels           */
+$border:        rgb(63, 63, 70);      /* Zinc 700 — structural borders     */
+$text:          rgb(244, 244, 246);   /* Pure Off-White — body text        */
+$text-muted:    rgb(113, 113, 122);   /* Zinc 500 — secondary text         */
+$model-gold:    rgb(250, 204, 21);    /* Gold — model names                */
+$prompt-pink:   rgb(236, 72, 153);    /* Hot Pink — prompt arrow           */
+$response:      rgb(139, 92, 246);    /* Deep Violet — assistant label     */
+$indigo:        rgb(129, 140, 248);   /* Soft Indigo — commands            */
+$teal:          rgb(45, 212, 191);    /* Vivid Teal — values               */
+$lavender:      rgb(167, 139, 250);   /* Lavender — labels                 */
+
+
+/* ── Global Screen ──────────────────────────────────────────────────────── */
+
+Screen {
+    background: $surface;
+    color: $text;
+    layout: horizontal;
+}
+
+
+/* ── Main Layout ────────────────────────────────────────────────────────── */
+
+#main-container {
+    width: 1fr;
+    height: 100%;
+    layout: vertical;
+}
+
+#chat-area {
+    width: 1fr;
+    height: 1fr;
+}
+
+
+/* ── Chat Log ───────────────────────────────────────────────────────────── */
+
+ChatLog {
+    background: $surface;
+    border: none;
+    padding: 1 2;
+    scrollbar-size: 1 1;
+    scrollbar-color: $accent 30%;
+    scrollbar-color-hover: $accent 50%;
+    scrollbar-color-active: $accent 70%;
+    scrollbar-background: $surface;
+    scrollbar-background-hover: $surface-1;
+    scrollbar-corner-color: $surface;
+}
+
+
+/* ── Input Panel ────────────────────────────────────────────────────────── */
+
+InputPanel {
+    dock: bottom;
+    height: auto;
+    max-height: 14;
+    padding: 0 1;
+    background: $surface;
+}
+
+PromptLabel {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+    color: $text-muted;
+}
+
+InputArea {
+    height: auto;
+    min-height: 3;
+    max-height: 10;
+    border: round $border;
+    background: $surface-1;
+    padding: 0 1;
+    color: $text;
+}
+
+InputArea:focus {
+    border: round $accent 50%;
+}
+
+
+/* ── Spinner ────────────────────────────────────────────────────────────── */
+
+SpinnerWidget {
+    height: 1;
+    padding: 0 2;
+    background: $surface;
+    color: $text-muted;
+}
+
+
+/* ── Status Bar ─────────────────────────────────────────────────────────── */
+
+StatusBar {
+    dock: bottom;
+    height: 1;
+    background: $surface-1;
+    color: $text-muted;
+    padding: 0 2;
+    border-top: tall $border;
+}
+
+
+/* ── Sidebar ────────────────────────────────────────────────────────────── */
+
+Sidebar {
+    width: 36;
+    dock: right;
+    background: $surface;
+    border-left: tall $border;
+    padding: 0;
+    display: none;
+    overflow-y: auto;
+    scrollbar-size: 1 1;
+    scrollbar-color: $accent 20%;
+}
+
+Sidebar.visible {
+    display: block;
+}
+
+SessionInfo {
+    padding: 1 1;
+    height: auto;
+    background: $surface;
+}
+
+ToolEventLog {
+    padding: 1 1;
+    height: auto;
+    max-height: 15;
+    background: $surface;
+}
+
+WorkspaceTree {
+    height: auto;
+    max-height: 20;
+    padding: 0 1;
+    background: $surface;
+}
+
+.separator {
+    height: 1;
+    color: $border;
+    padding: 0 1;
+}
+
+.section-header {
+    height: 1;
+    padding: 0 1;
+    color: $lavender;
+    text-style: bold;
+}
+
+
+/* ── Boot Screen ────────────────────────────────────────────────────────── */
+
+BootScreen {
+    align: center middle;
+    height: auto;
+    width: 100%;
+    padding: 2 0;
+    background: $surface;
+}
+
+BootLogo {
+    width: 100%;
+    height: auto;
+    content-align: center middle;
+    text-align: center;
+    padding: 1 0;
+}
+
+BootInfo {
+    width: 100%;
+    height: auto;
+    content-align: center middle;
+    text-align: center;
+    padding: 0 0 1 0;
+}
+
+
+/* ── Command Palette ────────────────────────────────────────────────────── */
+
+CommandPalette {
+    layer: overlay;
+}
+
+CommandPalette > .command-palette--highlight {
+    text-style: bold;
+    color: $accent;
+}
+
+
+/* ── Toast Notifications ────────────────────────────────────────────────── */
+
+Toast {
+    background: $surface-2;
+    border: tall $border;
+    color: $text;
+    padding: 0 2;
+}
