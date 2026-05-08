@@ -80,6 +80,10 @@ class InputArea(TextArea):
             super().__init__()
             self.direction = direction
 
+    class RemoveLastAttachment(Message):
+        """Emitted when the user presses Backspace on an empty input."""
+        pass
+
     def __init__(self, **kwargs) -> None:
         super().__init__(
             language=None,
@@ -102,6 +106,13 @@ class InputArea(TextArea):
                 self.post_message(self.Submitted(value))
                 self.text = ""
             return
+
+        if event.key == "backspace":
+            if not self.text:
+                self.post_message(self.RemoveLastAttachment())
+                event.prevent_default()
+                event.stop()
+                return
 
         if event.key == "tab":
             event.prevent_default()
@@ -133,7 +144,16 @@ class InputArea(TextArea):
 
 class AttachmentBadge(Label):
     """A badge showing an attached file."""
-    pass
+    
+    class RemoveAttachment(Message):
+        def __init__(self, filename: str) -> None:
+            super().__init__()
+            self.filename = filename
+
+    def on_click(self, event: events.Click) -> None:
+        filename = str(self.renderable).replace("📎 ", "").strip()
+        self.post_message(self.RemoveAttachment(filename))
+        self.remove()
 
 class InputPanel(Vertical):
     """Container for prompt label + input area with box-drawing border."""
