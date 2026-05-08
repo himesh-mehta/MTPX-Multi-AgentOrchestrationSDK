@@ -84,7 +84,6 @@ class MTPApp(App):
         self._refresh_status_bar()
         self._refresh_prompt_label()
         self._show_boot_info()
-        self.set_timer(2.5, self._dismiss_boot)
         self.set_timer(0.5, self._focus_input)
 
     def _focus_input(self) -> None:
@@ -106,45 +105,6 @@ class MTPApp(App):
             version=__version__, backend=self._state.backend,
             model=model, session_short=sid, cwd=cwd,
         )
-
-    def _dismiss_boot(self) -> None:
-        try:
-            self.query_one("#boot-screen", BootScreen).display = False
-        except Exception:
-            pass
-        # Write a compact welcome header into the ChatLog so it's not blank
-        try:
-            chat_log = self.query_one("#chat-log", ChatLog)
-            from rich.text import Text
-            welcome = Text()
-            welcome.append("  ╭─ ", style="#3f3f46")
-            welcome.append("MTP TUI", style="bold #c084fc")
-            welcome.append(" ready", style="#71717a")
-            welcome.append(" ─────────────────────────────────────╮\n", style="#3f3f46")
-            welcome.append("  │  ", style="#3f3f46")
-            welcome.append("Type a prompt", style="#f4f4f6")
-            welcome.append(" to start chatting  ·  ", style="#71717a")
-            welcome.append("@file", style="#38bdf8")
-            welcome.append(" to attach  ·  ", style="#71717a")
-            welcome.append("/help", style="#818cf8")
-            welcome.append(" for commands\n", style="#71717a")
-            welcome.append("  │  ", style="#3f3f46")
-            welcome.append("Tip:", style="italic #f472b6")
-            welcome.append(" Shift+Mouse to copy  ·  Ctrl+Y to copy last response\n", style="#71717a")
-            welcome.append("  │  ", style="#3f3f46")
-            model = active_model_name(self._state)
-            welcome.append(f"{self._state.backend}", style="#34d399")
-            welcome.append(" · ", style="#3f3f46")
-            welcome.append(f"{model}", style="#fbbf24")
-            welcome.append(" · ", style="#3f3f46")
-            welcome.append(f"mode={self._state.harness_mode}", style="#818cf8")
-            welcome.append(" · ", style="#3f3f46")
-            welcome.append(f"sandbox={self._state.codex_sandbox_mode}", style="#2dd4bf")
-            welcome.append("\n", style="")
-            welcome.append("  ╰─────────────────────────────────────────────────────╯", style="#3f3f46")
-            chat_log.write(welcome)
-        except Exception:
-            pass
 
     # ── UI refresh helpers ───────────────────────────────────────────────
 
@@ -427,6 +387,11 @@ class MTPApp(App):
             input_area.cursor_location = (cursor_row, start_idx + len(selected) + 1)
 
     def _send_prompt(self, raw: str) -> None:
+        try:
+            self.query_one("#boot-screen", BootScreen).display = False
+        except Exception:
+            pass
+
         chat_log = self.query_one("#chat-log", ChatLog)
         spinner = self.query_one("#spinner", SpinnerWidget)
 
@@ -578,6 +543,10 @@ class MTPApp(App):
         elif cmd == "clear":
             self.query_one("#chat-log", ChatLog).clear()
             cmd_log.remove_class("visible")
+            try:
+                self.query_one("#boot-screen", BootScreen).display = True
+            except Exception:
+                pass
         elif cmd == "status":
             chat_log.add_system_message(self._build_status_text())
         elif cmd == "sessions":
