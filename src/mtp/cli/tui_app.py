@@ -629,7 +629,13 @@ class MTPApp(App):
         elif cmd == "status":
             chat_log.add_system_message(self._build_status_text())
         elif cmd == "sessions":
-            chat_log.add_system_message(self._build_sessions_text())
+            input_area = self.query_one("#chat-input", InputArea)
+            input_area.text = "/load "
+            input_area.cursor_location = (0, 6)
+            cmd_log.remove_class("visible")
+            self._show_command_argument_suggestions("load", "")
+            try: self.query_one("#suggestion-list", OptionList).focus()
+            except Exception: pass
         elif cmd == "history":
             limit = int(arg) if arg and arg.isdigit() else None
             chat_log.add_system_message(self._build_history_text(limit))
@@ -652,7 +658,13 @@ class MTPApp(App):
             self._refresh_prompt_label()
         elif cmd == "backend":
             if not arg:
-                chat_log.add_system_message(self._build_providers_text())
+                input_area = self.query_one("#chat-input", InputArea)
+                input_area.text = "/backend "
+                input_area.cursor_location = (0, 9)
+                cmd_log.remove_class("visible")
+                self._show_command_argument_suggestions("backend", "")
+                try: self.query_one("#suggestion-list", OptionList).focus()
+                except Exception: pass
             else:
                 result = switch_backend(s, arg)
                 chat_log.add_command_result(result)
@@ -661,7 +673,13 @@ class MTPApp(App):
                 self._refresh_sidebar()
         elif cmd == "model":
             if not arg:
-                chat_log.add_system_message(self._build_models_text())
+                input_area = self.query_one("#chat-input", InputArea)
+                input_area.text = "/model "
+                input_area.cursor_location = (0, 7)
+                cmd_log.remove_class("visible")
+                self._show_command_argument_suggestions("model", "")
+                try: self.query_one("#suggestion-list", OptionList).focus()
+                except Exception: pass
             else:
                 self._handle_model_switch(arg)
         elif cmd == "reasoning":
@@ -724,7 +742,13 @@ class MTPApp(App):
             self._handle_apikey(arg)
         elif cmd == "load":
             if not arg:
-                chat_log.add_command_result("Usage: /load <session_id>")
+                input_area = self.query_one("#chat-input", InputArea)
+                input_area.text = "/load "
+                input_area.cursor_location = (0, 6)
+                cmd_log.remove_class("visible")
+                self._show_command_argument_suggestions("load", "")
+                try: self.query_one("#suggestion-list", OptionList).focus()
+                except Exception: pass
             else:
                 chat_log.add_system_message(f"Loading session: {arg}...")
                 try:
