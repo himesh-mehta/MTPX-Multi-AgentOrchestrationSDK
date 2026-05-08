@@ -4,6 +4,7 @@ import ast
 import fnmatch
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -47,7 +48,17 @@ class _Workspace:
         return str(path.resolve(strict=False).relative_to(self.root)).replace("\\", "/")
 
     def is_ignored(self, path: Path) -> bool:
-        return any(part in _DEFAULT_IGNORES for part in path.parts)
+        try:
+            parts = path.resolve(strict=False).relative_to(self.root).parts
+        except ValueError:
+            parts = path.parts
+        return any(part in _DEFAULT_IGNORES for part in parts)
+
+    def root_entries(self) -> list[dict[str, str]]:
+        entries: list[dict[str, str]] = []
+        for item in sorted(self.root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            entries.append({"name": item.name, "type": "directory" if item.is_dir() else "file"})
+        return entries
 
     def text_files(self, path: str = ".") -> list[Path]:
         start = self.resolve(path)
@@ -66,10 +77,9 @@ class ContextToolkit(ToolkitLoader):
 
     def list_tool_specs(self) -> list[ToolSpec]:
         return [
-            ToolSpec("project.inspect", "Summarize project files, languages, git state, and dependency manifests.", _schema({}), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("fs.glob", "Find files by glob pattern under the workspace.", _schema({"pattern": {"type": "string"}, "limit": {"type": "integer"}}, ["pattern"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("fs.read_text", "Read a text file with secret-file guardrails.", _schema({"path": {"type": "string"}, "max_chars": {"type": "integer"}}, ["path"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("fs.search", "Search text files for a literal or regex pattern.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "regex": {"type": "boolean"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("project.inspect", "Inspect the workspace root, count source file formats, and report concise git status. Returns counts only for files, never a recursive file list.", _schema({}), risk_level=ToolRiskLevel.READ_ONLY, cache_ttl_seconds=15),
+            ToolSpec("fs.search", "Find relevant files by word, text, fuzzy, and lightweight semantic matching. Returns relative paths from the workspace root.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("fs.read_text", "Read a bounded line window from a workspace text file by relative path.", _schema({"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("agent.explore_codebase", "Subagent-style deep codebase search. Use for broad grep and locating relevant files.", _schema({"task": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}}, ["task"]), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("agent.debug_context", "Subagent-style debug context gatherer: project summary, git diff, and likely files.", _schema({"symptom": {"type": "string"}, "query": {"type": "string"}}, ["symptom"]), risk_level=ToolRiskLevel.READ_ONLY),
         ]
@@ -78,61 +88,76 @@ class ContextToolkit(ToolkitLoader):
         specs = {spec.name: spec for spec in self.list_tool_specs()}
 
         def project_inspect() -> dict[str, Any]:
-            files = [p for p in self.ws.root.iterdir() if not self.ws.is_ignored(p)]
-            manifests = [name for name in ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "requirements.txt", "README.md", "AGENTS.md") if (self.ws.root / name).exists()]
             extensions: dict[str, int] = {}
-            for item in self.ws.text_files(".")[:2000]:
+            total_files = 0
+            for item in self.ws.text_files("."):
+                if _looks_secret(self.ws.rel(item)):
+                    continue
+                total_files += 1
                 extensions[item.suffix.lower() or "(none)"] = extensions.get(item.suffix.lower() or "(none)", 0) + 1
             git = _run(["git", "status", "--short"], self.ws.root, timeout=8)
             return {
                 "root": str(self.ws.root),
-                "top_level": [p.name + ("/" if p.is_dir() else "") for p in files[:80]],
-                "manifests": manifests,
-                "extensions": dict(sorted(extensions.items(), key=lambda kv: (-kv[1], kv[0]))[:20]),
+                "root_structure": self.ws.root_entries(),
+                "file_counts": {
+                    "total_text_files": total_files,
+                    "by_extension": dict(sorted(extensions.items(), key=lambda kv: (-kv[1], kv[0]))),
+                },
                 "git_status": git.get("stdout", "")[:4000],
             }
 
-        def fs_glob(pattern: str, limit: int = 200) -> list[str]:
-            matches = []
-            for item in self.ws.root.rglob(pattern):
-                if len(matches) >= max(1, limit):
-                    break
-                if self.ws.is_ignored(item):
-                    continue
-                matches.append(self.ws.rel(item) + ("/" if item.is_dir() else ""))
-            return matches
-
-        def fs_read_text(path: str, max_chars: int = 20000) -> str:
+        def fs_read_text(path: str, start_line: int = 1, end_line: int = 240) -> dict[str, Any]:
             target = self.ws.resolve(path)
             rel = self.ws.rel(target)
             if _looks_secret(rel):
                 raise ValueError("Reading secret-like files is blocked by the TUI harness.")
-            data = target.read_text(encoding="utf-8", errors="replace")
-            return data[: max(1000, int(max_chars))]
+            if not target.is_file():
+                raise ValueError("Path is not a file.")
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            total = len(lines)
+            start = max(1, int(start_line))
+            end = max(start, int(end_line))
+            end = min(end, start + 239, total)
+            content = "\n".join(lines[start - 1:end])
+            return {
+                "file": rel,
+                "start_line": start,
+                "end_line": end,
+                "total_lines": total,
+                "truncated": start > 1 or end < total,
+                "content": content,
+            }
 
-        def fs_search(query: str, path: str = ".", regex: bool = False, limit: int = 80) -> list[dict[str, Any]]:
-            import re
-
+        def fs_search(query: str, path: str = ".", limit: int = 80) -> dict[str, Any]:
+            terms = _search_terms(query)
+            query_norm = _normalize_text(query)
             hits: list[dict[str, Any]] = []
-            rx = re.compile(query) if regex else None
             for file in self.ws.text_files(path):
                 if _looks_secret(self.ws.rel(file)):
                     continue
                 try:
-                    lines = file.read_text(encoding="utf-8", errors="replace").splitlines()
+                    text = file.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     continue
-                for line_no, line in enumerate(lines, start=1):
-                    matched = bool(rx.search(line)) if rx else query.lower() in line.lower()
-                    if matched:
-                        hits.append({"file": self.ws.rel(file), "line": line_no, "text": line[:300]})
-                        if len(hits) >= max(1, limit):
-                            return hits
-            return hits
+                rel = self.ws.rel(file)
+                score, reasons, snippets = _score_search_match(query_norm, terms, rel, text)
+                if score <= 0:
+                    continue
+                hits.append({"file": rel, "score": round(score, 3), "match": reasons, "snippets": snippets[:3]})
+            hits.sort(key=lambda hit: (-hit["score"], hit["file"]))
+            bounded = hits[: max(1, int(limit))]
+            return {
+                "query": query,
+                "terms": terms,
+                "count": len(bounded),
+                "total_matches": len(hits),
+                "truncated": len(hits) > len(bounded),
+                "hits": bounded,
+            }
 
         def explore_codebase(task: str, query: str = "", limit: int = 120) -> dict[str, Any]:
             probe = query or _keywords(task)
-            return {"task": task, "query": probe, "hits": fs_search(probe, regex=False, limit=limit), "project": project_inspect()}
+            return {"task": task, "query": probe, "hits": fs_search(probe, limit=limit), "project": project_inspect()}
 
         def debug_context(symptom: str, query: str = "") -> dict[str, Any]:
             probe = query or _keywords(symptom)
@@ -141,7 +166,6 @@ class ContextToolkit(ToolkitLoader):
 
         handlers = {
             "project.inspect": project_inspect,
-            "fs.glob": fs_glob,
             "fs.read_text": fs_read_text,
             "fs.search": fs_search,
             "agent.explore_codebase": explore_codebase,
@@ -265,6 +289,66 @@ def _keywords(text: str) -> str:
     words = [w.strip(".,:;()[]{}\"'`").lower() for w in text.split()]
     useful = [w for w in words if len(w) >= 4 and w not in {"that", "this", "with", "from", "when", "where", "there"}]
     return useful[0] if useful else text[:40]
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _search_terms(query: str) -> list[str]:
+    words = re.findall(r"[A-Za-z0-9_./-]+", query.lower())
+    stop = {"the", "and", "for", "from", "that", "this", "with", "what", "where", "when", "into"}
+    terms = [word for word in words if len(word) >= 2 and word not in stop]
+    return terms or [query.lower().strip()]
+
+
+def _score_search_match(query_norm: str, terms: list[str], rel_path: str, text: str) -> tuple[float, list[str], list[str]]:
+    text_norm = _normalize_text(text)
+    rel_norm = rel_path.lower()
+    score = 0.0
+    reasons: list[str] = []
+    snippets: list[str] = []
+
+    if query_norm and query_norm in text_norm:
+        score += 8
+        reasons.append("text")
+    if query_norm and query_norm in rel_norm:
+        score += 5
+        reasons.append("path")
+
+    lines = text.splitlines()
+    for term in terms:
+        term_rx = re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
+        fuzzy_rx = re.compile(".*?".join(re.escape(ch) for ch in term), re.IGNORECASE) if len(term) >= 4 else None
+        term_hit = False
+        fuzzy_hit = False
+        for line_no, line in enumerate(lines, start=1):
+            if term_rx.search(line):
+                term_hit = True
+                if len(snippets) < 3:
+                    snippets.append(f"{line_no}: {line.strip()[:240]}")
+            elif fuzzy_rx and fuzzy_rx.search(line):
+                fuzzy_hit = True
+                if len(snippets) < 2:
+                    snippets.append(f"{line_no}: {line.strip()[:240]}")
+        if term in rel_norm:
+            score += 4
+            reasons.append(f"path:{term}")
+        if term_hit:
+            score += 3
+            reasons.append(f"word:{term}")
+        elif fuzzy_hit:
+            score += 1
+            reasons.append(f"fuzzy:{term}")
+
+    # Lightweight semantic signal: rank files higher when several query words co-occur,
+    # even if the full phrase is not present.
+    unique_term_hits = {term for term in terms if term in text_norm or term in rel_norm}
+    if len(unique_term_hits) >= 2:
+        score += len(unique_term_hits) * 1.5
+        reasons.append("semantic:term_cooccurrence")
+
+    return score, list(dict.fromkeys(reasons)), snippets
 
 
 def _run(cmd: list[str], cwd: Path, timeout: int) -> dict[str, Any]:

@@ -185,8 +185,10 @@ def run_mtp_prompt(
             # Handle completion
             elif event_type == "run_completed":
                 final_text = event.get("final_text", "")
-                if final_text and not final_text_chunks:
-                    final_text_chunks.append(final_text)
+                if final_text:
+                    # Always use final_text from run_completed if available
+                    if not final_text_chunks or not "".join(final_text_chunks).strip():
+                        final_text_chunks = [final_text]
         
         if emit_live:
             emit_live("status", "Processing response...")
