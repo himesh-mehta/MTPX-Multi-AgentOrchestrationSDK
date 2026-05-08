@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from textual.widgets import TextArea, Static
-from textual.containers import Vertical
+from textual.widgets import TextArea, Static, OptionList, Label
+from textual.containers import Vertical, Horizontal
 from textual.message import Message
 from textual.app import ComposeResult
 from textual import events
@@ -70,6 +70,16 @@ class InputArea(TextArea):
             super().__init__()
             self.value = value
 
+    class TabPressed(Message):
+        """Emitted when the user presses Tab."""
+        pass
+
+    class HistoryNavigate(Message):
+        """Emitted when the user presses Up at the top or Down at the bottom."""
+        def __init__(self, direction: int) -> None:
+            super().__init__()
+            self.direction = direction
+
     def __init__(self, **kwargs) -> None:
         super().__init__(
             language=None,
@@ -93,6 +103,26 @@ class InputArea(TextArea):
                 self.text = ""
             return
 
+        if event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.TabPressed())
+            return
+
+        if event.key == "up":
+            if self.cursor_location[0] == 0:
+                self.post_message(self.HistoryNavigate(-1))
+                event.prevent_default()
+                event.stop()
+                return
+
+        if event.key == "down":
+            if self.cursor_location[0] == self.document.line_count - 1:
+                self.post_message(self.HistoryNavigate(1))
+                event.prevent_default()
+                event.stop()
+                return
+
         # Let Ctrl-combos bubble up to the App for global bindings
         if event.key.startswith("ctrl+"):
             return  # Don't consume — let it bubble
@@ -100,6 +130,10 @@ class InputArea(TextArea):
         # All other keys: let TextArea handle normally
         return
 
+
+class AttachmentBadge(Label):
+    """A badge showing an attached file."""
+    pass
 
 class InputPanel(Vertical):
     """Container for prompt label + input area with box-drawing border."""
@@ -115,5 +149,7 @@ class InputPanel(Vertical):
     """
 
     def compose(self) -> ComposeResult:
+        yield OptionList(id="suggestion-list")
+        yield Horizontal(id="attachment-container")
         yield PromptLabel(id="prompt-label")
         yield InputArea(id="chat-input")

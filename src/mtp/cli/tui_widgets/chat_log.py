@@ -123,6 +123,7 @@ class ChatLog(RichLog):
 
         # ── Usage metrics ────────────────────────────────────────
         if msg.usage_lines:
+            self.write(Text(""))
             self._render_usage(msg.usage_lines)
 
         self.write(Text(""))  # spacer
