@@ -205,20 +205,56 @@ export default function DocPage() {
       </div>
 
       {/* Right Sidebar (TOC) */}
-      <aside className="hidden xl:block w-64 flex-shrink-0 pt-12 pr-8 sticky top-16 h-[calc(100vh-4rem)] overflow-y-auto">
-        <div className="text-[11px] font-semibold text-white/20 uppercase tracking-[0.2em] mb-4">On this page</div>
-        <ul className="space-y-3">
+      <aside className="hidden xl:block w-72 flex-shrink-0 pt-12 pr-8 sticky top-16 h-[calc(100vh-4rem)] overflow-y-auto">
+        <div className="flex items-center gap-3 mb-8">
+          <div className="h-px w-4 bg-[#facc15]/30" />
+          <span className="text-[10px] font-bold text-white/20 uppercase tracking-[0.25em] whitespace-nowrap">On this page</span>
+          <div className="h-px flex-1 bg-white/[0.08]" />
+        </div>
+        
+        <ul className="space-y-1">
           {headings.map((h) => (
             <li key={h.id}>
               <a 
                 href={`#${h.id}`} 
-                className="text-[13px] text-white/40 hover:text-[#facc15] transition-colors leading-relaxed block"
+                className="group flex items-center justify-between py-2 text-[13px] transition-all"
               >
-                {h.title}
+                <span className="text-white/40 group-hover:text-white transition-colors truncate pr-4">
+                  {h.title}
+                </span>
+                <div className="h-px flex-1 bg-white/[0.04] group-hover:bg-[#facc15]/20 transition-colors mr-3" />
+                <ChevronRight className="size-3 text-white/0 group-hover:text-[#facc15] group-hover:translate-x-0.5 transition-all" />
               </a>
             </li>
           ))}
         </ul>
+
+        {/* Quick Links / Related Pages */}
+        <div className="mt-16 pt-8 border-t border-white/[0.06]">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="h-px w-4 bg-[#facc15]/30" />
+            <span className="text-[10px] font-bold text-white/20 uppercase tracking-[0.25em] whitespace-nowrap">Navigation</span>
+            <div className="h-px flex-1 bg-white/[0.08]" />
+          </div>
+          <div className="space-y-4">
+             {prev && (
+               <Link href={`/docs/${prev.slug}`} className="group block">
+                 <div className="text-[10px] uppercase tracking-widest text-white/15 mb-1 group-hover:text-white/25 transition-colors">Previous</div>
+                 <div className="text-sm text-white/35 group-hover:text-[#facc15] transition-colors truncate">
+                   {prev.title}
+                 </div>
+               </Link>
+             )}
+             {next && (
+               <Link href={`/docs/${next.slug}`} className="group block">
+                 <div className="text-[10px] uppercase tracking-widest text-white/15 mb-1 group-hover:text-white/25 transition-colors">Next</div>
+                 <div className="text-sm text-white/35 group-hover:text-[#facc15] transition-colors truncate">
+                   {next.title}
+                 </div>
+               </Link>
+             )}
+          </div>
+        </div>
       </aside>
     </div>
   );
