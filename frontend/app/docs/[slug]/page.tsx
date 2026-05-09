@@ -8,6 +8,7 @@ import Link from "next/link";
 import { ChevronLeft, ChevronRight, Info, Lightbulb, AlertTriangle } from "lucide-react";
 import { providers } from "@/lib/providers";
 import { ProviderCard } from "@/components/docs/ProviderCard";
+import { DocScrollSpy } from "@/components/docs/DocScrollSpy";
 
 
 function slugify(text: string) {
@@ -157,8 +158,12 @@ export default function DocPage() {
     }));
 
   return (
-    <div className="flex justify-center w-full">
-      <div className="w-full max-w-5xl px-8 md:px-12 lg:px-16 py-12 pb-24 min-w-0">
+    <>
+      {/* Floating right-side scroll nav */}
+      <DocScrollSpy headings={headings} />
+
+      {/* Main content */}
+      <div className="w-full max-w-4xl mx-auto px-8 md:px-12 lg:px-16 py-12 pb-24">
         {/* Breadcrumb */}
         <div className="flex items-center gap-2 text-xs text-white/30 mb-8 font-mono">
           <Link href="/docs/introduction" className="hover:text-white/50 transition-colors">docs</Link>
@@ -203,59 +208,6 @@ export default function DocPage() {
           ) : <div />}
         </div>
       </div>
-
-      {/* Right Sidebar (TOC) */}
-      <aside className="hidden xl:block w-72 flex-shrink-0 pt-12 pr-8 sticky top-16 h-[calc(100vh-4rem)] overflow-y-auto">
-        <div className="flex items-center gap-3 mb-8">
-          <div className="h-px w-4 bg-[#facc15]/30" />
-          <span className="text-[10px] font-bold text-white/20 uppercase tracking-[0.25em] whitespace-nowrap">On this page</span>
-          <div className="h-px flex-1 bg-white/[0.08]" />
-        </div>
-        
-        <ul className="space-y-1">
-          {headings.map((h) => (
-            <li key={h.id}>
-              <a 
-                href={`#${h.id}`} 
-                className="group flex items-center justify-between py-2 text-[13px] transition-all"
-              >
-                <span className="text-white/40 group-hover:text-white transition-colors truncate pr-4">
-                  {h.title}
-                </span>
-                <div className="h-px flex-1 bg-white/[0.04] group-hover:bg-[#facc15]/20 transition-colors mr-3" />
-                <ChevronRight className="size-3 text-white/0 group-hover:text-[#facc15] group-hover:translate-x-0.5 transition-all" />
-              </a>
-            </li>
-          ))}
-        </ul>
-
-        {/* Quick Links / Related Pages */}
-        <div className="mt-16 pt-8 border-t border-white/[0.06]">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="h-px w-4 bg-[#facc15]/30" />
-            <span className="text-[10px] font-bold text-white/20 uppercase tracking-[0.25em] whitespace-nowrap">Navigation</span>
-            <div className="h-px flex-1 bg-white/[0.08]" />
-          </div>
-          <div className="space-y-4">
-             {prev && (
-               <Link href={`/docs/${prev.slug}`} className="group block">
-                 <div className="text-[10px] uppercase tracking-widest text-white/15 mb-1 group-hover:text-white/25 transition-colors">Previous</div>
-                 <div className="text-sm text-white/35 group-hover:text-[#facc15] transition-colors truncate">
-                   {prev.title}
-                 </div>
-               </Link>
-             )}
-             {next && (
-               <Link href={`/docs/${next.slug}`} className="group block">
-                 <div className="text-[10px] uppercase tracking-widest text-white/15 mb-1 group-hover:text-white/25 transition-colors">Next</div>
-                 <div className="text-sm text-white/35 group-hover:text-[#facc15] transition-colors truncate">
-                   {next.title}
-                 </div>
-               </Link>
-             )}
-          </div>
-        </div>
-      </aside>
-    </div>
+    </>
   );
 }
