@@ -6,6 +6,9 @@ import type { DocContentBlock } from "@/lib/docs-content";
 import { CodeBlock } from "@/components/CodeBlock";
 import Link from "next/link";
 import { ChevronLeft, ChevronRight, Info, Lightbulb, AlertTriangle } from "lucide-react";
+import { providers } from "@/lib/providers";
+import { ProviderCard } from "@/components/docs/ProviderCard";
+
 
 function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
   return (
@@ -88,6 +91,15 @@ function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            );
+
+          case "custom-providers-grid":
+            return (
+              <div key={idx} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 my-8">
+                {providers.map((p) => (
+                  <ProviderCard key={p.name} provider={p} />
+                ))}
               </div>
             );
 
