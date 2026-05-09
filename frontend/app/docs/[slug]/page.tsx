@@ -10,6 +10,13 @@ import { providers } from "@/lib/providers";
 import { ProviderCard } from "@/components/docs/ProviderCard";
 
 
+function slugify(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-");
+}
+
 function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
   return (
     <div className="space-y-6">
@@ -17,7 +24,11 @@ function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
         switch (block.type) {
           case "heading":
             return (
-              <h2 key={idx} className="text-xl font-semibold tracking-tight mt-10 mb-4 text-white/90 border-b border-white/[0.06] pb-3">
+              <h2 
+                key={idx} 
+                id={slugify(block.value)}
+                className="text-xl font-semibold tracking-tight mt-10 mb-4 text-white/90 border-b border-white/[0.06] pb-3"
+              >
                 {block.value}
               </h2>
             );
@@ -138,51 +149,77 @@ export default function DocPage() {
     );
   }
 
+  const headings = content
+    .filter(b => b.type === "heading")
+    .map(b => ({
+      title: b.value,
+      id: slugify(b.value)
+    }));
+
   return (
-    <div className="w-full max-w-5xl px-8 md:px-12 lg:px-16 py-12 pb-24">
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-xs text-white/30 mb-8 font-mono">
-        <Link href="/docs/introduction" className="hover:text-white/50 transition-colors">docs</Link>
-        <span>/</span>
-        <span className="text-white/50">{slug}</span>
+    <div className="flex justify-center w-full">
+      <div className="w-full max-w-5xl px-8 md:px-12 lg:px-16 py-12 pb-24 min-w-0">
+        {/* Breadcrumb */}
+        <div className="flex items-center gap-2 text-xs text-white/30 mb-8 font-mono">
+          <Link href="/docs/introduction" className="hover:text-white/50 transition-colors">docs</Link>
+          <span>/</span>
+          <span className="text-white/50">{slug}</span>
+        </div>
+
+        {/* Page Header */}
+        <header className="mb-10">
+          <h1 className="text-3xl font-bold tracking-tight mb-3">{doc.title}</h1>
+          <p className="text-lg text-white/50 leading-relaxed">{doc.description}</p>
+        </header>
+
+        {/* Content */}
+        <DocContentRenderer blocks={content} />
+
+        {/* Navigation Footer */}
+        <div className="mt-20 pt-8 border-t border-white/[0.06] flex items-center justify-between">
+          {prev ? (
+            <Link
+              href={`/docs/${prev.slug}`}
+              className="flex items-center gap-2 text-sm text-white/40 hover:text-white transition-colors group"
+            >
+              <ChevronLeft className="size-4 group-hover:-translate-x-0.5 transition-transform" />
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-white/25 mb-0.5">Previous</div>
+                <div>{prev.title}</div>
+              </div>
+            </Link>
+          ) : <div />}
+          {next ? (
+            <Link
+              href={`/docs/${next.slug}`}
+              className="flex items-center gap-2 text-sm text-white/40 hover:text-white transition-colors group text-right"
+            >
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-white/25 mb-0.5">Next</div>
+                <div>{next.title}</div>
+              </div>
+              <ChevronRight className="size-4 group-hover:translate-x-0.5 transition-transform" />
+            </Link>
+          ) : <div />}
+        </div>
       </div>
 
-      {/* Page Header */}
-      <header className="mb-10">
-        <h1 className="text-3xl font-bold tracking-tight mb-3">{doc.title}</h1>
-        <p className="text-lg text-white/50 leading-relaxed">{doc.description}</p>
-      </header>
-
-      {/* Content */}
-      <DocContentRenderer blocks={content} />
-
-      {/* Navigation Footer */}
-      <div className="mt-20 pt-8 border-t border-white/[0.06] flex items-center justify-between">
-        {prev ? (
-          <Link
-            href={`/docs/${prev.slug}`}
-            className="flex items-center gap-2 text-sm text-white/40 hover:text-white transition-colors group"
-          >
-            <ChevronLeft className="size-4 group-hover:-translate-x-0.5 transition-transform" />
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-white/25 mb-0.5">Previous</div>
-              <div>{prev.title}</div>
-            </div>
-          </Link>
-        ) : <div />}
-        {next ? (
-          <Link
-            href={`/docs/${next.slug}`}
-            className="flex items-center gap-2 text-sm text-white/40 hover:text-white transition-colors group text-right"
-          >
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-white/25 mb-0.5">Next</div>
-              <div>{next.title}</div>
-            </div>
-            <ChevronRight className="size-4 group-hover:translate-x-0.5 transition-transform" />
-          </Link>
-        ) : <div />}
-      </div>
+      {/* Right Sidebar (TOC) */}
+      <aside className="hidden xl:block w-64 flex-shrink-0 pt-12 pr-8 sticky top-16 h-[calc(100vh-4rem)] overflow-y-auto">
+        <div className="text-[11px] font-semibold text-white/20 uppercase tracking-[0.2em] mb-4">On this page</div>
+        <ul className="space-y-3">
+          {headings.map((h) => (
+            <li key={h.id}>
+              <a 
+                href={`#${h.id}`} 
+                className="text-[13px] text-white/40 hover:text-[#facc15] transition-colors leading-relaxed block"
+              >
+                {h.title}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </aside>
     </div>
   );
 }
