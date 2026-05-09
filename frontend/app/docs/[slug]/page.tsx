@@ -30,7 +30,7 @@ function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
             return (
               <h2 
                 key={idx} 
-                id={slugify(block.value)}
+                id={slugify(block.value || "")}
                 className="text-2xl font-bold tracking-tight mt-14 mb-5 text-white/95 border-b border-white/[0.08] pb-4"
               >
                 {block.value}
@@ -41,7 +41,7 @@ function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
             return (
               <h3 
                 key={idx} 
-                id={slugify(block.value)}
+                id={slugify(block.value || "")}
                 className="text-xl font-bold tracking-tight mt-10 mb-4 text-white/85"
               >
                 {block.value}
@@ -61,7 +61,7 @@ function DocContentRenderer({ blocks }: { blocks: DocContentBlock[] }) {
           case "code":
             return (
               <div key={idx} className="my-4">
-                <CodeBlock code={block.value} language={block.language || "bash"} />
+                <CodeBlock code={block.value || ""} language={block.language || "bash"} />
               </div>
             );
 
@@ -240,8 +240,8 @@ export default function DocPage() {
   const headings = content
     .filter(b => b.type === "heading")
     .map(b => ({
-      title: b.value,
-      id: slugify(b.value)
+      title: b.value || "",
+      id: slugify(b.value || "")
     }));
 
   return (
