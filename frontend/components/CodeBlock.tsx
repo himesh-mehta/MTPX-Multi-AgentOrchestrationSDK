@@ -25,6 +25,7 @@ export function CodeBlock({ code, language = "bash", className }: CodeBlockProps
         <span className="text-xs font-mono text-on-surface-variant uppercase tracking-wider">{language}</span>
         <button
           onClick={handleCopy}
+          suppressHydrationWarning
           className="text-on-surface-variant hover:text-primary transition-colors"
           aria-label="Copy code"
         >

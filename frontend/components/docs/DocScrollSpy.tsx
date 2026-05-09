@@ -81,6 +81,7 @@ export function DocScrollSpy({ headings }: DocScrollSpyProps) {
             onMouseEnter={() => setHoveredId(h.id)}
             onMouseLeave={() => setHoveredId(null)}
             aria-label={h.title}
+            suppressHydrationWarning
             className="group relative flex items-center justify-end py-[7px] pr-0 focus:outline-none"
           >
             {/* Title — slides in from right on hover/active */}
