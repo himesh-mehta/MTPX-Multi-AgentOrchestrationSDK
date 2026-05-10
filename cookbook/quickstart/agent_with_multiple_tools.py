@@ -1,30 +1,9 @@
 """
-🍳 MTP Cookbook — Recipe 03: Using Built-in Toolkits
+🍳 MTP Cookbook — Agent with Multiple Tools
 =====================================================
 MTP ships with ready-to-use toolkits. This recipe also shows how to
 replace built-in toolkits with custom @mtp_tool functions when the
 built-in causes planning/async errors with certain models.
-
-What you'll learn:
-- Registering built-in toolkits with the correct namespace
-- Writing lightweight @mtp_tool replacements for reliability
-- Combining multiple tools in one agent
-- Letting the agent pick the right tool automatically
-
-⚠️  Namespace matters!
-    The first argument of register_toolkit_loader() MUST match the
-    toolkit's internal namespace exactly:
-
-    CalculatorToolkit → "calculator"
-    ShellToolkit      → "shell"
-    WikipediaToolkit  → "wikipedia"
-    FileToolkit       → "file"
-    WebsiteToolkit    → "website"
-
-⚠️  Known issue with free/small models:
-    Some models generate $ref IDs that don't match MTP's execution plan,
-    causing PlanValidationError. The custom @mtp_tool approach below
-    avoids this entirely by removing the planning layer.
 
 Prerequisites:
     pip install mtp python-dotenv
@@ -33,7 +12,7 @@ Setup:
     OPENROUTER_API_KEY=your_key_here in .env
 
 Run:
-    python cookbook/00_quickstart/03_builtin_toolkits.py
+    python cookbook/quickstart/agent_with_multiple_tools.py
 """
 
 import math
@@ -44,38 +23,19 @@ from mtp.providers import OpenRouter
 Agent.load_dotenv_if_available()
 
 # ---------------------------------------------------------------------------
-# Step 1: Define reliable custom tools (no planning layer = no ref errors)
+# Step 1: Define reliable custom tools
 # ---------------------------------------------------------------------------
-# These replace CalculatorToolkit and ShellToolkit with simple @mtp_tool
-# functions that execute directly — compatible with all models.
-
-@mtp_tool(description=(
-    "Evaluate a mathematical expression and return the result. "
-    "Supports +, -, *, /, **, sqrt, and standard Python math."
-))
+@mtp_tool(description="Evaluate a mathematical expression and return the result.")
 def calculate(expression: str) -> str:
-    """
-    Safely evaluates a math expression using Python's math module.
-    Example: calculate("(45 * 12) + 120") → "660"
-    """
     try:
-        # Allow safe math functions only
         allowed = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
         result = eval(expression, {"__builtins__": {}}, allowed)  # noqa: S307
         return str(result)
     except Exception as e:
         return f"Error evaluating expression: {e}"
 
-
-@mtp_tool(description=(
-    "List the files and folders in a given directory path. "
-    "Use '.' for the current directory."
-))
+@mtp_tool(description="List the files and folders in a given directory path. Use '.' for the current directory.")
 def list_files(directory: str = ".") -> str:
-    """
-    Lists files and folders in the given directory.
-    Example: list_files(".") → "01_hello.py\n02_tool.py\n..."
-    """
     try:
         entries = os.listdir(directory)
         if not entries:
@@ -86,16 +46,13 @@ def list_files(directory: str = ".") -> str:
     except PermissionError:
         return f"Permission denied: '{directory}'"
 
-
 # ---------------------------------------------------------------------------
 # Step 2: Register tools and build the agent
 # ---------------------------------------------------------------------------
-# Note: we use MTPAgent with toolkit_from_functions just like Recipe 02
 travel_kit = Agent.toolkit_from_functions("system", calculate, list_files)
 tools = Agent.ToolRegistry()
 tools.register_toolkit_loader("system", travel_kit)
 
-# We use a stable free model from OpenRouter
 provider = OpenRouter(model="openai/gpt-oss-120b:free")
 
 agent = Agent.MTPAgent(
@@ -108,13 +65,12 @@ agent = Agent.MTPAgent(
     ),
 )
 
-
 # ---------------------------------------------------------------------------
 # Step 3: Run the agent
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 55)
-    print("  MTP Cookbook — 03: Built-in Toolkits (Custom Fallback)")
+    print("  MTP Cookbook — Agent with Multiple Tools")
     print("=" * 55)
 
     print("\n[Query 1] Calculator tool")
@@ -136,9 +92,40 @@ def main():
     print(f"Agent: {response}")
 
     print("\n" + "=" * 55)
-    print("✅ Done! Next: see 04_streaming.py")
+    print("✅ Done! Next: explore other agents in this directory.")
     print("=" * 55)
-
 
 if __name__ == "__main__":
     main()
+
+# =============================================================================
+# 📤 Output:
+# =============================================================================
+"""
+=======================================================
+  MTP Cookbook — Agent with Multiple Tools
+=======================================================
+
+[Query 1] Calculator tool
+------------------------------
+Agent: The result of ((45 * 12) + 120) divided by 7 is **approximately 94.29**.
+
+[Query 2] List files tool
+------------------------------
+Agent: Here are the items in the current directory:
+
+- `.env`
+- `.git`
+- `cookbook`
+- `docs`
+- `src`
+
+[Query 3] Combined
+------------------------------
+Agent: - The current directory contains **19 items**.  
+- 2^10 = 1024.
+
+=======================================================
+✅ Done! Next: explore other agents in this directory.
+=======================================================
+"""
