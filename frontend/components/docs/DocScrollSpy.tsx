@@ -72,8 +72,9 @@ export function DocScrollSpy({ headings }: DocScrollSpyProps) {
       {headings.map((h) => {
         const isActive = activeId === h.id;
         const isHovered = hoveredId === h.id;
-        const highlighted = isActive || isHovered;
-
+        
+        // "more visible" - increased base opacity
+        // "only prompt when hover" - changed from highlighted (active || hovered) to just isHovered
         return (
           <button
             key={h.id}
@@ -82,14 +83,14 @@ export function DocScrollSpy({ headings }: DocScrollSpyProps) {
             onMouseLeave={() => setHoveredId(null)}
             aria-label={h.title}
             suppressHydrationWarning
-            className="group relative flex items-center justify-end py-[7px] pr-0 focus:outline-none"
+            className="group relative flex items-center justify-end py-[4px] pr-0 focus:outline-none"
           >
-            {/* Title — slides in from right on hover/active */}
+            {/* Title — slides in from right ONLY on hover now */}
             <span
               className="text-[12px] font-medium tracking-tight mr-3 whitespace-nowrap transition-all duration-300 pointer-events-none"
               style={{
-                opacity: highlighted ? 1 : 0,
-                transform: highlighted ? "translateX(0)" : "translateX(6px)",
+                opacity: isHovered ? 1 : 0,
+                transform: isHovered ? "translateX(0)" : "translateX(6px)",
                 color: isActive ? "#facc15" : "rgba(255,255,255,0.7)",
               }}
             >
@@ -100,7 +101,7 @@ export function DocScrollSpy({ headings }: DocScrollSpyProps) {
             <div
               className="relative flex items-center transition-all duration-300"
               style={{
-                width: highlighted ? (isActive ? 48 : 36) : 20,
+                width: isHovered || isActive ? (isActive ? 48 : 36) : 24,
               }}
             >
               {/* Glow layer for active */}
@@ -113,12 +114,12 @@ export function DocScrollSpy({ headings }: DocScrollSpyProps) {
               <div
                 className="relative w-full rounded-full transition-all duration-300"
                 style={{
-                  height: isActive ? 3 : isHovered ? 2 : 1.5,
+                  height: isActive ? 3 : isHovered ? 2 : 2,
                   background: isActive
                     ? "#facc15"
                     : isHovered
-                    ? "rgba(255,255,255,0.55)"
-                    : "rgba(255,255,255,0.18)",
+                    ? "rgba(255,255,255,0.7)"
+                    : "rgba(255,255,255,0.35)",
                   boxShadow: isActive
                     ? "0 0 8px 1px rgba(250,204,21,0.5)"
                     : "none",
