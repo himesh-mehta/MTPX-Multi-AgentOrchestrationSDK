@@ -1,0 +1,84 @@
+[
+  {
+    "session_id": "hitl-session-1",
+    "user_id": null,
+    "metadata": {},
+    "messages": [
+      {
+        "role": "system",
+        "content": "You operate under MTP (Model Tool Protocol). Generate ExecutionPlans with batches of tool calls.\n\nPROTOCOL ESSENTIALS:\n- Tools use 'namespace.action' naming\n- Each call needs unique ID and can reference prior outputs via {\"$ref\": \"<call_id>\"}\n- Parallel batches: independent calls run concurrently\n- Sequential batches: calls run in order\n- Use depends_on for explicit ordering\n\nEXECUTION PLAN EXAMPLE:\n{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\"id\": \"call_1\", \"name\": \"toolkit_a.action_x\", \"arguments\": {\"param\": \"value\"}},\n        {\"id\": \"call_2\", \"name\": \"toolkit_b.action_y\", \"arguments\": {\"param\": \"value\"}}\n      ]\n    },\n    {\n      \"mode\": \"sequential\",\n      \"calls\": [\n        {\"id\": \"call_3\", \"name\": \"toolkit_a.action_z\", \"arguments\": {\"input\": {\"$ref\": \"call_1\"}}, \"depends_on\": [\"call_1\"]},\n        {\"id\": \"call_4\", \"name\": \"toolkit_c.action_w\", \"arguments\": {\"data\": {\"$ref\": \"call_3\"}}, \"depends_on\": [\"call_3\"]}\n      ]\n    }\n  ]\n}\n\nGUIDELINES:\n- Group independent operations in parallel batches for efficiency\n- Use $ref syntax to wire dependencies between calls\n- Respect risk levels: read_only (safe), write (modifies), destructive (requires approval)\n- Return concise answers grounded in actual tool outputs\n- Don't hallucinate results\u2014wait for execution\n\nWhen strict_dependency_mode enabled: explicit wiring required for same-toolkit multi-call batches.IN evey tool call there is a 'reasoning' argument write COT response, DON'T write tool specific reasoning"
+      },
+      {
+        "role": "system",
+        "content": "You are a Finance Agent that learns and improves over time.\n\n## Workflow\n1. Gather Information\n   - Use the `get_market_data` tool if needed.\n\n2. Propose Learnings\n   - After answering the user, consider if there is a reusable insight.\n   - If there is, immediately call `save_learning` to save it.\n   - The user will be prompted to approve the action in their terminal.\n\n## What Makes a Good Learning\n- Specific: \"Tech P/E ratios typically range 20-35x\"\n- Actionable: Can be applied to future questions\n"
+      },
+      {
+        "role": "user",
+        "content": "What's a healthy P/E ratio for tech stocks? Please save that insight."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-afe353294f368f8d",
+            "type": "function",
+            "function": {
+              "name": "save_learning",
+              "arguments": "{\n  \"learning\": \"A healthy P/E ratio for tech stocks typically ranges between 20 and 35 times earnings, though it can vary based on growth prospects and market conditions.\",\n  \"title\": \"Typical healthy P/E ratio range for tech stocks\",\n  \"reasoning\": \"User asked for healthy P/E ratio for tech stocks and requested to save the insight.\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-afe353294f368f8d",
+        "tool_name": "save_learning",
+        "content": "Unknown tool: save_learning",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-afa32d2aa6d79e82",
+            "type": "function",
+            "function": {
+              "name": "hitl_tools.save_learning",
+              "arguments": "{\n  \"learning\": \"A healthy P/E ratio for tech stocks typically ranges between 20 and 35 times earnings, though it can vary based on growth prospects and market conditions.\",\n  \"title\": \"Typical healthy P/E ratio range for tech stocks\",\n  \"reasoning\": \"User asked for healthy P/E ratio for tech stocks and requested to save the insight.\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-afa32d2aa6d79e82",
+        "tool_name": "hitl_tools.save_learning",
+        "content": "Unknown tool: hitl_tools.save_learning",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\n          \"id\": \"call_1\",\n          \"name\": \"functions.save_learning\",\n          \"arguments\": {\n            \"learning\": \"A healthy P/E ratio for tech stocks typically ranges between 20 and 35 times earnings, though it can vary based on growth prospects and market conditions.\",\n            \"title\": \"Typical healthy P/E ratio range for tech stocks\",\n            \"reasoning\": \"User asked for healthy P/E ratio for tech stocks and requested to save the insight.\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+      }
+    ],
+    "runs": [
+      {
+        "run_id": "fca29f4b-12bf-435a-8fef-97854e174ac4",
+        "input": "What's a healthy P/E ratio for tech stocks? Please save that insight.",
+        "final_text": "{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\n          \"id\": \"call_1\",\n          \"name\": \"functions.save_learning\",\n          \"arguments\": {\n            \"learning\": \"A healthy P/E ratio for tech stocks typically ranges between 20 and 35 times earnings, though it can vary based on growth prospects and market conditions.\",\n            \"title\": \"Typical healthy P/E ratio range for tech stocks\",\n            \"reasoning\": \"User asked for healthy P/E ratio for tech stocks and requested to save the insight.\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+        "cancelled": false,
+        "paused": false,
+        "total_tool_calls": 2,
+        "created_at": "2026-05-10T11:32:33.425912+00:00"
+      }
+    ],
+    "created_at": "2026-05-10T11:32:33.426527+00:00",
+    "updated_at": "2026-05-10T11:32:33.429743+00:00"
+  }
+]

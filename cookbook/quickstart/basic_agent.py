@@ -1,4 +1,4 @@
-﻿"\"\"
+"""
 🍳 MTP Cookbook — Basic Agent
 =====================================================
 The simplest way to use MTP. We initialize an agent and ask it a question.
@@ -11,7 +11,7 @@ Setup:
 
 Run:
     python cookbook/quickstart/basic_agent.py
-\"\""
+"""
 
 from mtp import Agent
 from mtp.providers import OpenRouter

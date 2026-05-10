@@ -1,0 +1,170 @@
+[
+  {
+    "session_id": "watchlist-session",
+    "user_id": null,
+    "metadata": {},
+    "messages": [
+      {
+        "role": "system",
+        "content": "You operate under MTP (Model Tool Protocol). Generate ExecutionPlans with batches of tool calls.\n\nPROTOCOL ESSENTIALS:\n- Tools use 'namespace.action' naming\n- Each call needs unique ID and can reference prior outputs via {\"$ref\": \"<call_id>\"}\n- Parallel batches: independent calls run concurrently\n- Sequential batches: calls run in order\n- Use depends_on for explicit ordering\n\nEXECUTION PLAN EXAMPLE:\n{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\"id\": \"call_1\", \"name\": \"toolkit_a.action_x\", \"arguments\": {\"param\": \"value\"}},\n        {\"id\": \"call_2\", \"name\": \"toolkit_b.action_y\", \"arguments\": {\"param\": \"value\"}}\n      ]\n    },\n    {\n      \"mode\": \"sequential\",\n      \"calls\": [\n        {\"id\": \"call_3\", \"name\": \"toolkit_a.action_z\", \"arguments\": {\"input\": {\"$ref\": \"call_1\"}}, \"depends_on\": [\"call_1\"]},\n        {\"id\": \"call_4\", \"name\": \"toolkit_c.action_w\", \"arguments\": {\"data\": {\"$ref\": \"call_3\"}}, \"depends_on\": [\"call_3\"]}\n      ]\n    }\n  ]\n}\n\nGUIDELINES:\n- Group independent operations in parallel batches for efficiency\n- Use $ref syntax to wire dependencies between calls\n- Respect risk levels: read_only (safe), write (modifies), destructive (requires approval)\n- Return concise answers grounded in actual tool outputs\n- Don't hallucinate results\u2014wait for execution\n\nWhen strict_dependency_mode enabled: explicit wiring required for same-toolkit multi-call batches.IN evey tool call there is a 'reasoning' argument write COT response, DON'T write tool specific reasoning"
+      },
+      {
+        "role": "system",
+        "content": "You are a Finance Agent that manages a stock watchlist.\n\n## Current Watchlist State\nWatchlist: [Empty]\n\n## Capabilities\n1. Manage watchlist\n   - Add stocks: use add_to_watchlist tool\n   - Remove stocks: use remove_from_watchlist tool\n\n2. Get stock data\n   - Use the get_market_data tool to fetch prices for watched stocks.\n\n## Rules\n- Always confirm watchlist changes.\n- When asked about \"my stocks\" or \"watchlist\", refer to the Current Watchlist State above.\n- Fetch fresh data when reporting on watchlist performance."
+      },
+      {
+        "role": "user",
+        "content": "Add NVDA, AAPL, and GOOGL to my watchlist"
+      },
+      {
+        "role": "assistant",
+        "content": "{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\n          \"id\": \"add_1\",\n          \"name\": \"state_tools.add_to_watchlist\",\n          \"arguments\": {\n            \"reasoning\": \"User requested to add NVDA to watchlist.\",\n            \"ticker\": \"NVDA\"\n          }\n        },\n        {\n          \"id\": \"add_2\",\n          \"name\": \"state_tools.add_to_watchlist\",\n          \"arguments\": {\n            \"reasoning\": \"User requested to add AAPL to watchlist.\",\n            \"ticker\": \"AAPL\"\n          }\n        },\n        {\n          \"id\": \"add_3\",\n          \"name\": \"state_tools.add_to_watchlist\",\n          \"arguments\": {\n            \"reasoning\": \"User requested to add GOOGL to watchlist.\",\n            \"ticker\": \"GOOGL\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+      },
+      {
+        "role": "user",
+        "content": "How are my watched stocks doing today?"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8092d17f4b68426d",
+            "type": "function",
+            "function": {
+              "name": "state_tools.get_market_data",
+              "arguments": "{\n  \"reasoning\": \"Fetch current market data for NVDA to report performance.\",\n  \"ticker\": \"NVDA\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-8092d17f4b68426d",
+        "tool_name": "state_tools.get_market_data",
+        "content": "Unknown tool: state_tools.get_market_data",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b095c015a356e0d2",
+            "type": "function",
+            "function": {
+              "name": "state_tools.get_market_data",
+              "arguments": "{\n  \"reasoning\": \"Fetch current market data for NVDA to report performance.\",\n  \"ticker\": \"NVDA\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-b095c015a356e0d2",
+        "tool_name": "state_tools.get_market_data",
+        "content": "Unknown tool: state_tools.get_market_data",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8442da9793973a17",
+            "type": "function",
+            "function": {
+              "name": "state_tools.get_market_data",
+              "arguments": "{\n  \"reasoning\": \"Fetch current market data for NVDA to report performance.\",\n  \"ticker\": \"NVDA\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-8442da9793973a17",
+        "tool_name": "state_tools.get_market_data",
+        "content": "Unknown tool: state_tools.get_market_data",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a075d921f47a222c",
+            "type": "function",
+            "function": {
+              "name": "state_tools.get_market_data",
+              "arguments": "{\n  \"reasoning\": \"Fetch current market data for NVDA to report performance.\",\n  \"ticker\": \"NVDA\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-a075d921f47a222c",
+        "tool_name": "state_tools.get_market_data",
+        "content": "Unknown tool: state_tools.get_market_data",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a2bc58bd80b35696",
+            "type": "function",
+            "function": {
+              "name": "state_tools.get_market_data",
+              "arguments": "{\n  \"reasoning\": \"Fetch current market data for NVDA, AAPL, and GOOGL to report performance.\",\n  \"ticker\": \"NVDA\"\n}"
+            },
+            "reasoning": null
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-a2bc58bd80b35696",
+        "tool_name": "state_tools.get_market_data",
+        "content": "Unknown tool: state_tools.get_market_data",
+        "success": false,
+        "cached": false
+      },
+      {
+        "role": "assistant",
+        "content": "{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\n          \"id\": \"md_nvda\",\n          \"name\": \"market_data.get_market_data\",\n          \"arguments\": {\n            \"reasoning\": \"Fetch current price for NVDA to report today's performance.\",\n            \"ticker\": \"NVDA\"\n          }\n        },\n        {\n          \"id\": \"md_aapl\",\n          \"name\": \"market_data.get_market_data\",\n          \"arguments\": {\n            \"reasoning\": \"Fetch current price for AAPL to report today's performance.\",\n            \"ticker\": \"AAPL\"\n          }\n        },\n        {\n          \"id\": \"md_googl\",\n          \"name\": \"market_data.get_market_data\",\n          \"arguments\": {\n            \"reasoning\": \"Fetch current price for GOOGL to report today's performance.\",\n            \"ticker\": \"GOOGL\"\n          }\n        }\n      ]\n    }\n  ]\n}"
+      }
+    ],
+    "runs": [
+      {
+        "run_id": "3ec592fb-9cf6-423d-acd7-f2a16f8f56a0",
+        "input": "Add NVDA, AAPL, and GOOGL to my watchlist",
+        "final_text": "{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\n          \"id\": \"add_1\",\n          \"name\": \"state_tools.add_to_watchlist\",\n          \"arguments\": {\n            \"reasoning\": \"User requested to add NVDA to watchlist.\",\n            \"ticker\": \"NVDA\"\n          }\n        },\n        {\n          \"id\": \"add_2\",\n          \"name\": \"state_tools.add_to_watchlist\",\n          \"arguments\": {\n            \"reasoning\": \"User requested to add AAPL to watchlist.\",\n            \"ticker\": \"AAPL\"\n          }\n        },\n        {\n          \"id\": \"add_3\",\n          \"name\": \"state_tools.add_to_watchlist\",\n          \"arguments\": {\n            \"reasoning\": \"User requested to add GOOGL to watchlist.\",\n            \"ticker\": \"GOOGL\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+        "cancelled": false,
+        "paused": false,
+        "total_tool_calls": 0,
+        "created_at": "2026-05-10T11:24:13.564757+00:00"
+      },
+      {
+        "run_id": "53ec1ae0-766d-41e1-87b6-69d70c3f7d95",
+        "input": "How are my watched stocks doing today?",
+        "final_text": "{\n  \"batches\": [\n    {\n      \"mode\": \"parallel\",\n      \"calls\": [\n        {\n          \"id\": \"md_nvda\",\n          \"name\": \"market_data.get_market_data\",\n          \"arguments\": {\n            \"reasoning\": \"Fetch current price for NVDA to report today's performance.\",\n            \"ticker\": \"NVDA\"\n          }\n        },\n        {\n          \"id\": \"md_aapl\",\n          \"name\": \"market_data.get_market_data\",\n          \"arguments\": {\n            \"reasoning\": \"Fetch current price for AAPL to report today's performance.\",\n            \"ticker\": \"AAPL\"\n          }\n        },\n        {\n          \"id\": \"md_googl\",\n          \"name\": \"market_data.get_market_data\",\n          \"arguments\": {\n            \"reasoning\": \"Fetch current price for GOOGL to report today's performance.\",\n            \"ticker\": \"GOOGL\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+        "cancelled": false,
+        "paused": false,
+        "total_tool_calls": 5,
+        "created_at": "2026-05-10T11:25:10.241534+00:00"
+      }
+    ],
+    "created_at": "2026-05-10T11:24:13.565361+00:00",
+    "updated_at": "2026-05-10T11:25:10.248629+00:00"
+  }
+]
