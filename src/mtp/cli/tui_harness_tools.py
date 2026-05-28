@@ -10,6 +10,7 @@ from typing import Any
 
 from mtp.protocol import ToolRiskLevel, ToolSpec
 from mtp.runtime import RegisteredTool, ToolkitLoader
+from mtp.codebase import CodebaseMemory, CodebaseMemoryToolkit
 
 
 _TEXT_EXTENSIONS = {
@@ -79,6 +80,7 @@ class ContextToolkit(ToolkitLoader):
         return [
             ToolSpec("project.inspect", "Inspect the workspace root, count source file formats, and report concise git status. Returns counts only for files, never a recursive file list.", _schema({}), risk_level=ToolRiskLevel.READ_ONLY, cache_ttl_seconds=15),
             ToolSpec("fs.search", "Find relevant files by word, text, fuzzy, and lightweight semantic matching. Returns relative paths from the workspace root.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("fs.grep", "Search indexed codebase memory first, then live files, and return relevant matching snippets.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("fs.read_text", "Read a bounded line window from a workspace text file by relative path.", _schema({"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("agent.explore_codebase", "Subagent-style deep codebase search. Use for broad grep and locating relevant files.", _schema({"task": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}}, ["task"]), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("agent.debug_context", "Subagent-style debug context gatherer: project summary, git diff, and likely files.", _schema({"symptom": {"type": "string"}, "query": {"type": "string"}}, ["symptom"]), risk_level=ToolRiskLevel.READ_ONLY),
@@ -96,6 +98,7 @@ class ContextToolkit(ToolkitLoader):
                 total_files += 1
                 extensions[item.suffix.lower() or "(none)"] = extensions.get(item.suffix.lower() or "(none)", 0) + 1
             git = _run(["git", "status", "--short"], self.ws.root, timeout=8)
+            memory_status = CodebaseMemory(self.ws.root).status()
             return {
                 "root": str(self.ws.root),
                 "root_structure": self.ws.root_entries(),
@@ -104,6 +107,13 @@ class ContextToolkit(ToolkitLoader):
                     "by_extension": dict(sorted(extensions.items(), key=lambda kv: (-kv[1], kv[0]))),
                 },
                 "git_status": git.get("stdout", "")[:4000],
+                "codebase_memory": {
+                    "enabled": memory_status.enabled,
+                    "files": memory_status.file_count,
+                    "chunks": memory_status.chunk_count,
+                    "conversation_summaries": memory_status.summary_count,
+                    "last_scan_at": memory_status.last_scan_at,
+                },
             }
 
         def fs_read_text(path: str, start_line: int = 1, end_line: int = 240) -> dict[str, Any]:
@@ -129,6 +139,29 @@ class ContextToolkit(ToolkitLoader):
             }
 
         def fs_search(query: str, path: str = ".", limit: int = 80) -> dict[str, Any]:
+            memory = CodebaseMemory(self.ws.root)
+            if path in {".", "", None} and memory.is_enabled():
+                memory_hits = memory.search(query, limit=limit)
+                if memory_hits:
+                    return {
+                        "query": query,
+                        "source": "codebase_memory",
+                        "count": len(memory_hits),
+                        "total_matches": len(memory_hits),
+                        "truncated": False,
+                        "hits": [
+                            {
+                                "file": hit.file,
+                                "score": hit.score,
+                                "match": hit.match,
+                                "start_line": hit.start_line,
+                                "end_line": hit.end_line,
+                                "kind": hit.kind,
+                                "snippets": [hit.snippet],
+                            }
+                            for hit in memory_hits
+                        ],
+                    }
             terms = _search_terms(query)
             query_norm = _normalize_text(query)
             hits: list[dict[str, Any]] = []
@@ -155,6 +188,9 @@ class ContextToolkit(ToolkitLoader):
                 "hits": bounded,
             }
 
+        def fs_grep(query: str, path: str = ".", limit: int = 80) -> dict[str, Any]:
+            return fs_search(query=query, path=path, limit=limit)
+
         def explore_codebase(task: str, query: str = "", limit: int = 120) -> dict[str, Any]:
             probe = query or _keywords(task)
             return {"task": task, "query": probe, "hits": fs_search(probe, limit=limit), "project": project_inspect()}
@@ -168,6 +204,7 @@ class ContextToolkit(ToolkitLoader):
             "project.inspect": project_inspect,
             "fs.read_text": fs_read_text,
             "fs.search": fs_search,
+            "fs.grep": fs_grep,
             "agent.explore_codebase": explore_codebase,
             "agent.debug_context": debug_context,
         }
@@ -273,6 +310,7 @@ class CommandToolkit(ToolkitLoader):
 def register_harness_toolkits(registry: Any, *, root: str | Path) -> None:
     registry.register_toolkit_loader("project", ContextToolkit(root))
     registry.register_toolkit_loader("fs", ContextToolkit(root))
+    registry.register_toolkit_loader("codebase", CodebaseMemoryToolkit(root))
     registry.register_toolkit_loader("agent", ContextToolkit(root))
     registry.register_toolkit_loader("edit", EditToolkit(root))
     registry.register_toolkit_loader("shell", CommandToolkit(root))
