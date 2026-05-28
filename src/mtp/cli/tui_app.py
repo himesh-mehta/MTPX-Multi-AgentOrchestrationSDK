@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from pathlib import Path
+import time
 from typing import Any
 
 from textual.app import App, ComposeResult
@@ -76,6 +77,12 @@ class MTPApp(App):
         self._input_history: list[str] = []
         self._codebase_scan_progress: str | None = None
         self._codebase_scan_root: Path | None = None
+        self._live_status: str = ""
+        self._live_reasoning: str = ""
+        self._live_text: str = ""
+        self._live_tool_events: list[str] = []
+        self._live_warnings: list[str] = []
+        self._last_live_render_at: float = 0.0
 
     @property
     def state(self) -> TUIState:
@@ -546,9 +553,9 @@ class MTPApp(App):
             f"> {self._state.backend} · {model} · mode={self._state.harness_mode}"
         )
 
+        self._reset_live_preview()
         spinner.start("Thinking")
 
-        import time
         self._turn_start_time = time.monotonic()
 
         # Store raw prompt for turn recording
@@ -564,8 +571,12 @@ class MTPApp(App):
     ) -> ChatResult:
         """Worker coroutine — runs blocking LLM call in thread."""
         import asyncio
+
+        def emit_live(kind: str, message: str) -> None:
+            self.call_from_thread(self._handle_live_event, kind, message)
+
         result = await asyncio.to_thread(
-            run_prompt_blocking, self._state, expanded_prompt
+            run_prompt_blocking, self._state, expanded_prompt, emit_callback=emit_live
         )
         result.attachments = attachments
         result.warnings = [*att_warnings, *result.warnings]
@@ -604,6 +615,68 @@ class MTPApp(App):
         cmd_log.add_class("visible")
         cmd_log.write(Text(f"  {message}", style=style))
 
+    def _reset_live_preview(self) -> None:
+        self._live_status = ""
+        self._live_reasoning = ""
+        self._live_text = ""
+        self._live_tool_events = []
+        self._live_warnings = []
+        self._last_live_render_at = 0.0
+
+    def _render_live_preview(self, *, force: bool = False) -> None:
+        from rich.text import Text
+
+        now = time.monotonic()
+        if not force and now - self._last_live_render_at < 0.05:
+            return
+        self._last_live_render_at = now
+
+        cmd_log = self.query_one("#cmd-log", RichLog)
+        cmd_log.clear()
+        cmd_log.add_class("visible")
+
+        if self._live_status:
+            cmd_log.write(Text(f"  > {self._live_status}", style="#818cf8"))
+
+        if self._live_tool_events:
+            cmd_log.write(Text("  Tools", style="bold #c084fc"))
+            for event in self._live_tool_events[-8:]:
+                cmd_log.write(Text(f"    {event}", style="#2dd4bf"))
+
+        if self._live_reasoning.strip():
+            cmd_log.write(Text("  Reasoning", style="bold #38bdf8"))
+            cmd_log.write(Text(f"    {self._live_reasoning[-2500:]}", style="#71717a"))
+
+        if self._live_text:
+            cmd_log.write(Text("  Agent", style="bold #c084fc"))
+            cmd_log.write(Text(f"    {self._live_text}", style="#f4f4f6"))
+
+        for warning in self._live_warnings[-4:]:
+            cmd_log.write(Text(f"  ! {warning}", style="bold #fbbf24"))
+
+    def _handle_live_event(self, kind: str, message: str) -> None:
+        spinner = self.query_one("#spinner", SpinnerWidget)
+        if kind == "status":
+            self._live_status = message
+            spinner.update_label(message or "Thinking")
+        elif kind in {"tool", "tool_end"}:
+            self._live_tool_events.append(message)
+            self._state.last_tool_events = list(self._live_tool_events)
+            self._refresh_sidebar()
+        elif kind == "warn":
+            self._live_warnings.append(message)
+        elif kind == "reasoning":
+            self._live_reasoning += message
+            if not self._live_status:
+                spinner.update_label("Reasoning")
+        elif kind == "text":
+            self._live_text += message
+            if not self._live_status:
+                spinner.update_label("Streaming response")
+        else:
+            self._live_status = message
+        self._render_live_preview()
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         spinner = self.query_one("#spinner", SpinnerWidget)
 
@@ -638,6 +711,14 @@ class MTPApp(App):
 
         if event.state == WorkerState.SUCCESS:
             spinner.stop()
+            self._render_live_preview(force=True)
+            self._reset_live_preview()
+            try:
+                cmd_log = self.query_one("#cmd-log", RichLog)
+                cmd_log.clear()
+                cmd_log.remove_class("visible")
+            except Exception:
+                pass
             result: ChatResult = event.worker.result
 
             # Record the turn with the original raw prompt
@@ -658,7 +739,6 @@ class MTPApp(App):
                     break
 
             # Calculate elapsed time
-            import time
             elapsed = time.monotonic() - getattr(self, "_turn_start_time", time.monotonic())
 
             # Render response
@@ -681,12 +761,16 @@ class MTPApp(App):
 
         elif event.state == WorkerState.ERROR:
             spinner.stop()
+            self._render_live_preview(force=True)
+            self._reset_live_preview()
             self.query_one("#chat-log", ChatLog).add_system_message(
                 f"⚡ Error: {event.worker.error}", style="bold #f43f5e"
             )
 
         elif event.state == WorkerState.CANCELLED:
             spinner.stop()
+            self._render_live_preview(force=True)
+            self._reset_live_preview()
             self.query_one("#chat-log", ChatLog).add_system_message(
                 "⚡ Request cancelled.", style="#fbbf24"
             )
@@ -932,6 +1016,7 @@ class MTPApp(App):
                 f"files={status.file_count} chunks={status.chunk_count} summaries={status.summary_count}\n"
                 f"last_scan_at={status.last_scan_at or '(never)'}"
             )
+            self._reset_live_preview()
             return
 
         if sub != "memory":
@@ -994,6 +1079,7 @@ class MTPApp(App):
                 provider_settings_path, load_provider_settings,
                 ensure_provider_entry, save_provider_settings,
             )
+            self._reset_live_preview()
             settings_path = provider_settings_path(s.session_store.file_path)
             settings = load_provider_settings(settings_path)
             entry = ensure_provider_entry(settings, s.backend)

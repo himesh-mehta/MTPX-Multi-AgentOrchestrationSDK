@@ -87,7 +87,7 @@ except ImportError:
     HTML = None  # type: ignore[assignment, misc]
 
 
-_BACKENDS = {"codex", "openai", "groq", "claude", "gemini", "openrouter", "mistral", "cohere", "sambanova", "cerebras", "deepseek", "togetherai", "fireworksai"}
+_BACKENDS = {"codex", "openai", "groq", "claude", "gemini", "openrouter", "mistral", "cohere", "sambanova", "cerebras", "deepseek", "togetherai", "fireworksai", "xiaomi"}
 _REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 _MAX_ATTACHMENTS = 8
 _MAX_ATTACHMENT_CHARS = 16000
