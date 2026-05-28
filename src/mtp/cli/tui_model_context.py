@@ -29,6 +29,17 @@ MODEL_CONTEXT_WINDOWS: Dict[str, int] = {
     "gemini-2.0-flash-exp": 1_000_000,
     "gemini-1.5-pro": 2_000_000,
     "gemini-1.5-flash": 1_000_000,
+
+    # Xiaomi MiMo models
+    "mimo-v2.5-pro": 1_000_000,
+    "mimo-v2-pro": 1_000_000,
+    "mimo-v2.5": 1_000_000,
+    "mimo-v2-omni": 256_000,
+    "mimo-v2-flash": 256_000,
+    "mimo-v2.5-tts": 8_000,
+    "mimo-v2.5-tts-voiceclone": 8_000,
+    "mimo-v2.5-tts-voicedesign": 8_000,
+    "mimo-v2-tts": 8_000,
     
     # Groq models
     "llama-3.3-70b-versatile": 128_000,
@@ -96,6 +107,7 @@ PROVIDER_DEFAULT_CONTEXT: Dict[str, int] = {
     "deepseek": 128_000,
     "togetherai": 128_000,
     "fireworksai": 128_000,
+    "xiaomi": 1_000_000,
 }
 
 
