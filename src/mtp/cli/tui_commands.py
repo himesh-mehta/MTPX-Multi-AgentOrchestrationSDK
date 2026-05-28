@@ -27,6 +27,7 @@ COMMANDS: list[tuple[str, str, str, str]] = [
     ("Toggle Sidebar", "Show/hide workspace sidebar", "sidebar", ""),
     ("Models", "Show all available models", "models", ""),
     ("Tools", "Show tool events from last turn", "tools", ""),
+    ("Codebase Memory", "Enable or inspect project memory", "codebase", "memory"),
     # Reasoning
     ("Reasoning: None", "Set reasoning effort to none", "reasoning", "none"),
     ("Reasoning: Low", "Set reasoning effort to low", "reasoning", "low"),
@@ -104,7 +105,7 @@ SLASH_COMMANDS = {
 SLASH_WITH_ARG = {
     "/backend", "/model", "/apikey", "/reasoning", "/mode",
     "/rounds", "/autoresearch", "/research", "/cd", "/load",
-    "/open", "/sandbox", "/cat", "/new", "/history",
+    "/open", "/sandbox", "/cat", "/new", "/history", "/codebase",
 }
 
 
@@ -124,7 +125,7 @@ def parse_slash_command(raw: str) -> tuple[str, str] | None:
         "help", "exit", "compose", "new", "reset", "clear", "status",
         "history", "sessions", "load", "backend", "apikey", "models",
         "model", "reasoning", "rounds", "codex-login", "autoresearch",
-        "research", "cd", "tools", "sandbox", "cat",
+        "research", "cd", "tools", "sandbox", "cat", "codebase",
     }
     head = raw[1:].split(" ", 1)[0].strip().lower()
     if head in command_heads:

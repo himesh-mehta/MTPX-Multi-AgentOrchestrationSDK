@@ -158,6 +158,7 @@ if HAS_PROMPT_TOOLKIT:
             "/sessions", "/history", "/clear", "/cd", "/tools",
             "/backend", "/models", "/model", "/reasoning", "/rounds",
             "/autoresearch", "/research", "/codex-login", "/sandbox",
+            "/codebase",
         ]
 
         def get_completions(self, document, complete_event):
