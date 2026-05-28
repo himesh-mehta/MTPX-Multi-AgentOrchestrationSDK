@@ -232,11 +232,21 @@ def _run_mtp(
         model = entry.get("model") or DEFAULT_PROVIDER_MODELS.get(state.backend, "default")
         api_key = entry.get("api_key")
         base_url = entry.get("base_url")
+        provider_options: dict[str, Any] | None = None
+        if state.backend == "xiaomi":
+            provider_options = {}
+            if entry.get("thinking_mode"):
+                provider_options["thinking_mode"] = entry["thinking_mode"]
+            if entry.get("final_thinking_mode"):
+                provider_options["final_thinking_mode"] = entry["final_thinking_mode"]
+            if not provider_options:
+                provider_options = None
 
         try:
             selection = ProviderSelection(
                 provider_name=state.backend, model_name=model,
                 api_key=api_key, base_url=base_url,
+                provider_options=provider_options,
             )
             provider = build_tui_provider(selection)
             state.agent = build_harness_agent(
@@ -322,11 +332,20 @@ def switch_backend(state: TUIState, provider_name: str) -> str:
     model = entry.get("model") or DEFAULT_PROVIDER_MODELS.get(provider_name, "default")
     api_key = entry.get("api_key")
     base_url = entry.get("base_url")
+    provider_options: dict[str, Any] | None = None
+    if provider_name == "xiaomi":
+        provider_options = {}
+        if entry.get("thinking_mode"):
+            provider_options["thinking_mode"] = entry["thinking_mode"]
+        if entry.get("final_thinking_mode"):
+            provider_options["final_thinking_mode"] = entry["final_thinking_mode"]
+        if not provider_options:
+            provider_options = None
 
     try:
         selection = ProviderSelection(
             provider_name=provider_name, model_name=model,
-            api_key=api_key, base_url=base_url,
+            api_key=api_key, base_url=base_url, provider_options=provider_options,
         )
         provider = build_tui_provider(selection)
         state.agent = build_harness_agent(
