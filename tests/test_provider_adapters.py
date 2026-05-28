@@ -460,8 +460,32 @@ class ProviderAdapterTests(unittest.TestCase):
             tools=[ToolSpec(name="fs.read_text", description="x", input_schema={"type": "object"})],
         )
         self.assertEqual(fake.calls[0]["extra_body"]["thinking"]["type"], "disabled")
-        self.assertIsNone(action.response_text)
+        self.assertEqual(action.response_text, "done")
         self.assertIsNone(action.plan)
+
+    def test_xiaomi_enabled_mode_still_disables_tool_rounds_after_tool_history(self) -> None:
+        fake = _FakeXiaomiClient([_OpenAIResponse(_OpenAIMessage("done"))])
+        provider = XiaomiToolCallingProvider(client=fake, thinking_mode="enabled", final_thinking_mode="enabled")
+        provider.next_action(
+            messages=[
+                {"role": "user", "content": "inspect"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "fs.search", "arguments": "{\"query\":\"spinner\"}"},
+                        }
+                    ],
+                    "reasoning_content": "Prior reasoning",
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"hits\": []}"},
+            ],
+            tools=[ToolSpec(name="fs.read_text", description="x", input_schema={"type": "object"})],
+        )
+        self.assertEqual(fake.calls[0]["extra_body"]["thinking"]["type"], "disabled")
 
     def test_xiaomi_inline_tool_call_fallback_parses_text_payload(self) -> None:
         fake = _FakeXiaomiClient(
