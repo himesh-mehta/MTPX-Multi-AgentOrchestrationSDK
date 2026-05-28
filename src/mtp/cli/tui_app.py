@@ -23,12 +23,14 @@ from .tui_state import (
     resolve_model, resolve_reasoning,
     MODEL_PRESETS, REASONING_SHORTCUTS,
 )
+from .tui_thinking import apply_thinking_value, get_thinking_capability
 from .tui_widgets.chat_log import ChatLog, ChatMessage
 from .tui_widgets.input_area import InputPanel, InputArea, PromptLabel, AttachmentBadge
-from .tui_widgets.status_bar import StatusBar
+from .tui_widgets.status_bar import StatusBar, ThinkingBadge
 from .tui_widgets.sidebar import Sidebar, SessionInfo, ToolEventLog
 from .tui_widgets.spinner_widget import SpinnerWidget
 from .tui_widgets.boot_screen import BootScreen, BootInfo
+from .tui_widgets.thinking_dialog import ThinkingDialog
 from .tui_commands import MTPCommandProvider, parse_slash_command
 from .tui_workers import (
     save_tui_session, record_turn, collect_prompt_attachments,
@@ -47,6 +49,14 @@ class CodebaseScanResult:
     files_deleted: int
     chunks_indexed: int
     db_path: Path
+
+
+@dataclass(slots=True)
+class CodebaseRefreshResult:
+    root: Path
+    changed_files: int
+    files_deleted: int
+    chunks_indexed: int
 
 
 class MTPApp(App):
@@ -77,6 +87,8 @@ class MTPApp(App):
         self._input_history: list[str] = []
         self._codebase_scan_progress: str | None = None
         self._codebase_scan_root: Path | None = None
+        self._llm_worker_running = False
+        self._memory_refresh_running = False
         self._live_status: str = ""
         self._live_reasoning: str = ""
         self._live_text: str = ""
@@ -105,9 +117,12 @@ class MTPApp(App):
 
     def on_mount(self) -> None:
         self._refresh_status_bar()
+        self._refresh_sidebar()
         self._refresh_prompt_label()
+        self._refresh_sidebar()
         self._show_boot_info()
         self.set_timer(0.5, self._focus_input)
+        self.set_interval(20.0, self._schedule_background_memory_refresh)
 
     def _focus_input(self) -> None:
         try:
@@ -123,27 +138,33 @@ class MTPApp(App):
         model = active_model_name(self._state)
         sid = self._state.session_id.split("-")[-1][:8]
         cwd = str(self._state.cwd.name or self._state.cwd)
+        thinking = get_thinking_capability(self._state)
         boot_info = self.query_one("#boot-info", BootInfo)
         boot_info.set_info(
             version=__version__, backend=self._state.backend,
             model=model, session_short=sid, cwd=cwd,
+            thinking_label=thinking.label if thinking else None,
+            thinking_value=thinking.current_label if thinking else None,
         )
 
     # ── UI refresh helpers ───────────────────────────────────────────────
 
     def _refresh_status_bar(self) -> None:
         try:
+            thinking = get_thinking_capability(self._state)
             self.query_one("#status-bar", StatusBar).update_status(
                 backend=self._state.backend,
                 model=active_model_name(self._state),
                 session_id=self._state.session_id,
                 mode=self._state.harness_mode,
-                reasoning=self._state.reasoning_effort,
                 turn_count=len(self._state.transcript),
                 sandbox_mode=self._state.codex_sandbox_mode,
+                thinking_label=thinking.label if thinking else None,
+                thinking_value=thinking.current_label if thinking else None,
             )
         except Exception:
             pass
+        self._show_boot_info()
 
     def _refresh_prompt_label(self) -> None:
         try:
@@ -156,6 +177,7 @@ class MTPApp(App):
 
     def _refresh_sidebar(self) -> None:
         try:
+            thinking = get_thinking_capability(self._state)
             self.query_one("#session-info", SessionInfo).update_info(
                 session_id=self._state.session_id,
                 label=self._state.session_label or "",
@@ -163,12 +185,33 @@ class MTPApp(App):
                 model=active_model_name(self._state),
                 turn_count=len(self._state.transcript),
                 mode=self._state.harness_mode,
+                thinking_label=thinking.label if thinking else None,
+                thinking_value=thinking.current_label if thinking else None,
             )
             self.query_one("#tool-event-log", ToolEventLog).update_events(
                 self._state.last_tool_events
             )
         except Exception:
             pass
+
+    def on_thinking_badge_activated(self, event: ThinkingBadge.Activated) -> None:
+        capability = get_thinking_capability(self._state)
+        if capability is None:
+            return
+
+        def _apply(result: str | None) -> None:
+            if not result:
+                return
+            try:
+                message = apply_thinking_value(self._state, result)
+            except ValueError as exc:
+                self.notify(str(exc), title="Thinking", severity="error")
+                return
+            self._refresh_status_bar()
+            self._refresh_sidebar()
+            self.query_one("#chat-log", ChatLog).add_command_result(message)
+
+        self.push_screen(ThinkingDialog(capability), callback=_apply)
 
     # ── Input handling ───────────────────────────────────────────────────
 
@@ -382,6 +425,7 @@ class MTPApp(App):
             "/models": "Show all models",
             "/apikey": "Manage API keys",
             "/reasoning": "Set reasoning level",
+            "/thinking": "Set thinking mode",
             "/mode": "Set harness mode",
             "/sandbox": "Cycle sandbox mode",
             "/load": "Load a session",
@@ -560,6 +604,7 @@ class MTPApp(App):
 
         # Store raw prompt for turn recording
         self._pending_raw_prompt = raw
+        self._llm_worker_running = True
 
         self.run_worker(
             self._run_llm_worker(expanded, attachments, att_warnings),
@@ -601,6 +646,19 @@ class MTPApp(App):
             db_path=memory.db_path,
         )
 
+    async def _run_codebase_refresh_worker(self, root: Path) -> CodebaseRefreshResult:
+        import asyncio
+        from mtp.codebase import CodebaseMemory
+
+        memory = CodebaseMemory(root)
+        stats = await asyncio.to_thread(memory.refresh_changed)
+        return CodebaseRefreshResult(
+            root=root,
+            changed_files=stats.changed_files,
+            files_deleted=stats.files_deleted,
+            chunks_indexed=stats.chunks_indexed,
+        )
+
     def _update_codebase_scan_progress(self, percent: int, files_seen: int, changed_files: int) -> None:
         self._codebase_scan_progress = f"Indexing codebase {percent}%  files={files_seen} changed={changed_files}"
         try:
@@ -614,6 +672,51 @@ class MTPApp(App):
         cmd_log = self.query_one("#cmd-log", RichLog)
         cmd_log.add_class("visible")
         cmd_log.write(Text(f"  {message}", style=style))
+
+    def _schedule_background_memory_refresh(self) -> None:
+        if self._llm_worker_running or self._memory_refresh_running or self._codebase_scan_progress is not None:
+            return
+        try:
+            from mtp.codebase import CodebaseMemory
+
+            memory = CodebaseMemory(self._state.cwd)
+            if not memory.is_enabled():
+                return
+        except Exception:
+            return
+        self._memory_refresh_running = True
+        self.run_worker(
+            self._run_codebase_refresh_worker(self._state.cwd),
+            name="codebase_refresh",
+            exclusive=False,
+        )
+
+    def _format_codebase_memory_show(self, root: Path) -> str:
+        from mtp.codebase import CodebaseMemory
+
+        data = CodebaseMemory(root).show(limit=8)
+        lines = [
+            f"Codebase memory {'ON' if data['enabled'] else 'OFF'}",
+            f"root={data['root']}",
+            f"db={data['db_path']}",
+            f"db_size_bytes={data['db_size_bytes']}",
+            f"files={data['files']} chunks={data['chunks']} summaries={data['summaries']}",
+            f"last_scan_at={data['last_scan_at'] or '(never)'}",
+        ]
+        if data["languages"]:
+            lines.append("languages=" + ", ".join(f"{item['language']}:{item['files']}" for item in data["languages"]))
+        if data["chunk_kinds"]:
+            lines.append("chunk_kinds=" + ", ".join(f"{item['kind']}:{item['count']}" for item in data["chunk_kinds"]))
+        if data["largest_files"]:
+            lines.append("largest_files=")
+            for item in data["largest_files"]:
+                lines.append(f"  {item['path']} size={item['size']} lines={item['lines']} lang={item['language']}")
+        if data["recent_summaries"]:
+            lines.append("recent_summaries=")
+            for item in data["recent_summaries"]:
+                model = f" model={item['model']}" if item["model"] else ""
+                lines.append(f"  {item['created_at']} {item['title']}{model}")
+        return "\n".join(lines)
 
     def _reset_live_preview(self) -> None:
         self._live_status = ""
@@ -696,6 +799,7 @@ class MTPApp(App):
                     f"  saved={result.db_path}"
                 )
                 self._codebase_scan_progress = None
+                self._schedule_background_memory_refresh()
             elif event.state == WorkerState.ERROR:
                 spinner.stop()
                 self._append_cmd_log(f"Codebase scan failed: {event.worker.error}", style="bold #f43f5e")
@@ -706,8 +810,29 @@ class MTPApp(App):
                 self._codebase_scan_progress = None
             return
 
+        if event.worker.name == "codebase_refresh":
+            if event.state == WorkerState.SUCCESS:
+                result: CodebaseRefreshResult = event.worker.result
+                if result.changed_files or result.files_deleted:
+                    self._append_cmd_log(
+                        "Background memory refresh complete\n"
+                        f"  changed={result.changed_files} deleted={result.files_deleted} "
+                        f"chunks={result.chunks_indexed}",
+                        style="#38bdf8",
+                    )
+            elif event.state == WorkerState.ERROR:
+                self._append_cmd_log(
+                    f"Background memory refresh failed: {event.worker.error}",
+                    style="bold #f43f5e",
+                )
+            self._memory_refresh_running = False
+            return
+
         if event.worker.name != "llm_call":
             return
+
+        if event.state in {WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED}:
+            self._llm_worker_running = False
 
         if event.state == WorkerState.SUCCESS:
             spinner.stop()
@@ -723,6 +848,7 @@ class MTPApp(App):
 
             # Record the turn with the original raw prompt
             record_turn(self._state, self._pending_raw_prompt, result)
+            self._schedule_background_memory_refresh()
 
             # Auto-generate title from first prompt
             if len(self._state.transcript) == 1 and not self._state.session_label:
@@ -895,7 +1021,28 @@ class MTPApp(App):
                 except Exception: pass
             else:
                 self._handle_model_switch(arg)
-        elif cmd == "reasoning":
+        elif cmd in {"reasoning", "thinking"}:
+            capability = get_thinking_capability(s)
+            if capability is None:
+                chat_log.add_command_result("Thinking controls are not available for the current backend/model.")
+                self._refresh_status_bar()
+                self._refresh_sidebar()
+                return
+            if not arg:
+                choices = ", ".join(option.label for option in capability.options)
+                chat_log.add_command_result(f"Usage: /{cmd} <{choices}>")
+                self._refresh_status_bar()
+                self._refresh_sidebar()
+                return
+            try:
+                message = apply_thinking_value(s, arg)
+                chat_log.add_command_result(message)
+            except ValueError:
+                choices = ", ".join(option.label for option in capability.options)
+                chat_log.add_command_result(f"Usage: /{cmd} <{choices}>")
+            self._refresh_status_bar()
+            self._refresh_sidebar()
+            return
             resolved = resolve_reasoning(arg) if arg else None
             if resolved:
                 s.reasoning_effort = resolved
@@ -1020,12 +1167,17 @@ class MTPApp(App):
             return
 
         if sub != "memory":
-            chat_log.add_command_result("Usage: /codebase memory <on|off> [root] or /codebase status")
+            chat_log.add_command_result("Usage: /codebase memory <on|off|show> [root] or /codebase status")
             return
 
         action = pieces[1].lower() if len(pieces) >= 2 else ""
         root = Path(" ".join(pieces[2:])).expanduser().resolve() if len(pieces) >= 3 else self._state.cwd
         memory = CodebaseMemory(root)
+
+        if action == "show":
+            chat_log.add_command_result(self._format_codebase_memory_show(root))
+            self._reset_live_preview()
+            return
 
         if action == "off":
             memory.set_enabled(False)
@@ -1055,12 +1207,12 @@ class MTPApp(App):
         chat_log.add_command_result(
             f"Current project root: {root}\n"
             f"Codebase memory is {'ON' if status.enabled else 'OFF'}.\n"
-            "Choose on/off with arrows + Enter, or type /codebase status manually."
+            "Choose on/off/show with arrows + Enter."
         )
         input_area = self.query_one("#chat-input", InputArea)
         input_area.text = "/codebase memory "
         input_area.cursor_location = (0, len(input_area.text))
-        self._populate_and_show_suggestions(["on", "off"], prefix=_ARG_SUGGESTION_PREFIX)
+        self._populate_and_show_suggestions(["on", "off", "show"], prefix=_ARG_SUGGESTION_PREFIX)
         option_list = self.query_one("#suggestion-list", OptionList)
         option_list.focus()
         option_list.highlighted = 0
@@ -1089,6 +1241,7 @@ class MTPApp(App):
             save_tui_session(s)
             chat_log.add_command_result(f"✓ {s.backend} model: {resolved}")
         self._refresh_status_bar()
+        self._refresh_sidebar()
 
     def _handle_sandbox(self, arg: str) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
@@ -1144,10 +1297,11 @@ class MTPApp(App):
         table.add_row("", "/model <name>", "Switch model")
         table.add_row("", "/models", "Show all models")
         table.add_row("", "/apikey", "Manage API keys")
-        table.add_row("", "/reasoning", "Set reasoning level")
+        table.add_row("", "/reasoning", "Set reasoning level / thinking mode")
+        table.add_row("", "/thinking", "Set thinking mode")
         table.add_row("", "/mode", "Set harness mode")
         table.add_row("", "/sandbox", "Cycle sandbox mode")
-        table.add_row("", "/codebase memory", "Enable/disable project memory")
+        table.add_row("", "/codebase memory", "Enable, disable, or inspect project memory")
         
         table.add_row("Keys", "Ctrl+P", "Command palette")
         table.add_row("", "Ctrl+B", "Toggle sidebar")
@@ -1160,6 +1314,7 @@ class MTPApp(App):
         from rich.table import Table
         from rich.panel import Panel
         s = self._state
+        thinking = get_thinking_capability(s)
         
         table = Table(show_header=False, box=None, padding=(0, 2))
         table.add_column("Key", style="bold #38bdf8")
@@ -1170,7 +1325,8 @@ class MTPApp(App):
         table.add_row("backend", s.backend)
         table.add_row("model", active_model_name(s))
         table.add_row("mode", s.harness_mode)
-        table.add_row("reasoning", str(s.reasoning_effort))
+        if thinking:
+            table.add_row(thinking.label, thinking.current_label)
         table.add_row("sandbox", s.codex_sandbox_mode)
         table.add_row("rounds", str(s.max_rounds))
         table.add_row("cwd", str(s.cwd))

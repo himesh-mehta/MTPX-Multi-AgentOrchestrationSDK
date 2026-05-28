@@ -403,6 +403,7 @@ def _print_help() -> None:
             ("/codebase memory", "Show codebase memory options"),
             ("/codebase memory on [root]", "Scan project and enable codebase memory"),
             ("/codebase memory off", "Disable codebase memory"),
+            ("/codebase memory show", "Inspect stored memory details"),
             ("/autoresearch on|off", "Toggle autoresearch (MTP providers)"),
             ("/research <text>", "Set research instructions"),
             ("/codex-login", "Run official codex login flow"),
@@ -2948,7 +2949,7 @@ def _handle_codebase_command(state: TUIState, arg: str) -> str:
         return (
             f"{C_LABEL}Current project root:{RESET} {C_VALUE}{state.cwd}{RESET}\n"
             f"  {C_LABEL}Codebase memory:{RESET} {C_VALUE}{'on' if status.enabled else 'off'}{RESET}\n"
-            f"  {C_DIM}Options: {C_CMD}/codebase memory on{RESET} or {C_CMD}/codebase memory off{RESET}"
+            f"  {C_DIM}Options: {C_CMD}/codebase memory on{RESET}, {C_CMD}/codebase memory off{RESET}, or {C_CMD}/codebase memory show{RESET}"
         )
     sub = parts[0].lower()
     if sub == "status":
@@ -2960,11 +2961,26 @@ def _handle_codebase_command(state: TUIState, arg: str) -> str:
             f"  last_scan_at={status.last_scan_at or '(never)'}"
         )
     if sub != "memory":
-        return f"{C_WARNING}Usage:{RESET} {C_CMD}/codebase memory <on|off> [root]{RESET}"
+        return f"{C_WARNING}Usage:{RESET} {C_CMD}/codebase memory <on|off|show> [root]{RESET}"
 
     action = parts[1].lower() if len(parts) >= 2 else ""
     root = Path(" ".join(parts[2:])).expanduser().resolve() if len(parts) >= 3 else state.cwd
     memory = CodebaseMemory(root)
+    if action == "show":
+        data = memory.show(limit=8)
+        lines = [
+            f"{C_LABEL}Codebase memory:{RESET} {C_VALUE}{'on' if data['enabled'] else 'off'}{RESET}",
+            f"  root={data['root']}",
+            f"  db={data['db_path']}",
+            f"  db_size_bytes={data['db_size_bytes']}",
+            f"  files={data['files']} chunks={data['chunks']} summaries={data['summaries']}",
+            f"  last_scan_at={data['last_scan_at'] or '(never)'}",
+        ]
+        if data["languages"]:
+            lines.append("  languages=" + ", ".join(f"{item['language']}:{item['files']}" for item in data["languages"]))
+        if data["chunk_kinds"]:
+            lines.append("  chunk_kinds=" + ", ".join(f"{item['kind']}:{item['count']}" for item in data["chunk_kinds"]))
+        return "\n".join(lines)
     if action == "off":
         memory.set_enabled(False)
         return f"{C_SUCCESS}{_SYM_OK}{RESET} Codebase memory off for {C_VALUE}{root}{RESET}."
@@ -2973,7 +2989,7 @@ def _handle_codebase_command(state: TUIState, arg: str) -> str:
         return (
             f"{C_LABEL}Project root:{RESET} {C_VALUE}{root}{RESET}\n"
             f"  {C_LABEL}Codebase memory:{RESET} {C_VALUE}{'on' if status.enabled else 'off'}{RESET}\n"
-            f"  {C_DIM}Choose: {C_CMD}/codebase memory on{RESET} or {C_CMD}/codebase memory off{RESET}"
+            f"  {C_DIM}Choose: {C_CMD}/codebase memory on{RESET}, {C_CMD}/codebase memory off{RESET}, or {C_CMD}/codebase memory show{RESET}"
         )
 
     print(f"  {C_INFO}Scanning codebase memory for {C_VALUE}{root}{RESET}")
