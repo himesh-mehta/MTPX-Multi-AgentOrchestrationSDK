@@ -139,13 +139,13 @@ class XiaomiToolCallingProvider(ProviderAdapter):
         stage: str,
     ) -> str | None:
         if stage == "finalize":
-            return self.final_thinking_mode
+            if self.final_thinking_mode is not None:
+                return self.final_thinking_mode
+            return "disabled" if self.thinking_mode == "disabled" else "enabled"
         if not tools:
-            if self.thinking_mode == "adaptive":
-                return "enabled"
-            return self.thinking_mode
-        if self.thinking_mode != "adaptive":
-            return self.thinking_mode
+            return "disabled" if self.thinking_mode == "disabled" else "enabled"
+        if self.thinking_mode == "disabled":
+            return "disabled"
         return "disabled" if self._history_contains_tool_round(messages) else "enabled"
 
 

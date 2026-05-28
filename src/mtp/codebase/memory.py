@@ -144,6 +144,103 @@ class CodebaseMemory:
                 schema_version=int(self._get_meta(conn, "schema_version") or self.schema_version),
             )
 
+    def show(self, *, limit: int = 8) -> dict[str, Any]:
+        status = self.status()
+        if not self.db_path.exists():
+            return {
+                "root": str(status.root),
+                "db_path": str(status.db_path),
+                "enabled": status.enabled,
+                "db_size_bytes": 0,
+                "files": status.file_count,
+                "chunks": status.chunk_count,
+                "summaries": status.summary_count,
+                "last_scan_at": status.last_scan_at,
+                "languages": [],
+                "chunk_kinds": [],
+                "largest_files": [],
+                "recent_summaries": [],
+            }
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            languages = [
+                {
+                    "language": str(language or "(none)"),
+                    "files": int(file_count or 0),
+                    "lines": int(line_count or 0),
+                }
+                for language, file_count, line_count in conn.execute(
+                    """
+                    select coalesce(language, '(none)'), count(*), coalesce(sum(line_count), 0)
+                    from files
+                    group by language
+                    order by count(*) desc, language asc
+                    limit ?
+                    """,
+                    (max(1, int(limit)),),
+                )
+            ]
+            chunk_kinds = [
+                {"kind": str(kind), "count": int(count or 0)}
+                for kind, count in conn.execute(
+                    """
+                    select kind, count(*)
+                    from chunks
+                    group by kind
+                    order by count(*) desc, kind asc
+                    limit ?
+                    """,
+                    (max(1, int(limit)),),
+                )
+            ]
+            largest_files = [
+                {
+                    "path": str(path),
+                    "size": int(size or 0),
+                    "lines": int(line_count or 0),
+                    "language": str(language or "(none)"),
+                }
+                for path, size, line_count, language in conn.execute(
+                    """
+                    select path, size, line_count, coalesce(language, '(none)')
+                    from files
+                    order by size desc, path asc
+                    limit ?
+                    """,
+                    (max(1, int(limit)),),
+                )
+            ]
+            recent_summaries = [
+                {
+                    "title": str(title),
+                    "created_at": str(created_at),
+                    "model": str(model or ""),
+                }
+                for title, created_at, model in conn.execute(
+                    """
+                    select title, created_at, model
+                    from conversation_summaries
+                    order by id desc
+                    limit ?
+                    """,
+                    (max(1, int(limit)),),
+                )
+            ]
+        return {
+            "root": str(status.root),
+            "db_path": str(status.db_path),
+            "enabled": status.enabled,
+            "db_size_bytes": self.db_path.stat().st_size if self.db_path.exists() else 0,
+            "files": status.file_count,
+            "chunks": status.chunk_count,
+            "summaries": status.summary_count,
+            "last_scan_at": status.last_scan_at,
+            "languages": languages,
+            "chunk_kinds": chunk_kinds,
+            "largest_files": largest_files,
+            "recent_summaries": recent_summaries,
+        }
+
     def scan(
         self,
         *,
