@@ -128,6 +128,15 @@ _MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.1-codex-max": 400_000,
     "gpt-5-codex": 400_000,
     "gpt-4o": 128_000,
+    "mimo-v2.5-pro": 1_000_000,
+    "mimo-v2-pro": 1_000_000,
+    "mimo-v2.5": 1_000_000,
+    "mimo-v2-omni": 256_000,
+    "mimo-v2-flash": 256_000,
+    "mimo-v2.5-tts": 8_000,
+    "mimo-v2.5-tts-voiceclone": 8_000,
+    "mimo-v2.5-tts-voicedesign": 8_000,
+    "mimo-v2-tts": 8_000,
 }
 
 

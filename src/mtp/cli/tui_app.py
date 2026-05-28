@@ -20,7 +20,7 @@ from textual.worker import Worker, WorkerState
 from .tui_state import (
     TUIState, ChatResult, active_model_name,
     new_session_id, generate_session_title_from_prompt,
-    resolve_model, resolve_reasoning,
+    resolve_model,
     MODEL_PRESETS, REASONING_SHORTCUTS,
 )
 from .tui_thinking import apply_thinking_value, get_thinking_capability
@@ -81,6 +81,8 @@ class MTPApp(App):
         super().__init__(**kwargs)
         self._state = state
         self._pending_raw_prompt: str = ""
+        self._pending_display_prompt: str = ""
+        self._pending_display_attachments: list[str] = []
         self._history_index: int | None = None
         self._history_draft: str = ""
         self._pending_attachments: list[str] = []  # Track the raw prompt for recording
@@ -119,7 +121,7 @@ class MTPApp(App):
         self._refresh_status_bar()
         self._refresh_sidebar()
         self._refresh_prompt_label()
-        self._refresh_sidebar()
+        self._rebuild_chat_log()
         self._show_boot_info()
         self.set_timer(0.5, self._focus_input)
         self.set_interval(20.0, self._schedule_background_memory_refresh)
@@ -148,6 +150,62 @@ class MTPApp(App):
         )
 
     # ── UI refresh helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_thinking_text(usage_lines: list[str]) -> str:
+        for line in usage_lines:
+            if line.startswith("thinking="):
+                return line.replace("thinking=", "", 1).strip()
+        return ""
+
+    def _live_message_active(self) -> bool:
+        return bool(
+            self._live_reasoning.strip()
+            or self._live_text.strip()
+            or self._live_tool_events
+            or self._live_warnings
+        )
+
+    def _current_turn_banner(self) -> str:
+        return f"> {self._state.backend} - {active_model_name(self._state)} - mode={self._state.harness_mode}"
+
+    def _clear_pending_turn_display(self) -> None:
+        self._pending_display_prompt = ""
+        self._pending_display_attachments = []
+
+    def _rebuild_chat_log(self) -> None:
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.clear()
+
+        for turn in self._state.transcript:
+            chat_log.add_user_message(turn.prompt, turn.attachments)
+            chat_log.add_assistant_message(
+                ChatMessage(
+                    role="assistant",
+                    text=turn.response,
+                    model=turn.model,
+                    backend=turn.backend,
+                    warnings=turn.warnings,
+                    usage_lines=turn.usage_lines,
+                    thinking=self._extract_thinking_text(turn.usage_lines),
+                )
+            )
+
+        if self._pending_display_prompt:
+            chat_log.add_user_message(self._pending_display_prompt, self._pending_display_attachments)
+            chat_log.add_system_message(self._current_turn_banner())
+            if self._live_message_active():
+                chat_log.add_assistant_message(
+                    ChatMessage(
+                        role="assistant",
+                        text=self._live_text,
+                        model=active_model_name(self._state),
+                        backend=self._state.backend,
+                        tool_events=list(self._live_tool_events),
+                        warnings=list(self._live_warnings),
+                        thinking=self._live_reasoning.strip(),
+                    )
+                )
 
     def _refresh_status_bar(self) -> None:
         try:
@@ -583,21 +641,23 @@ class MTPApp(App):
         except Exception:
             pass
 
-        chat_log = self.query_one("#chat-log", ChatLog)
+        try:
+            cmd_log = self.query_one("#cmd-log", RichLog)
+            cmd_log.clear()
+            cmd_log.remove_class("visible")
+        except Exception:
+            pass
+
         spinner = self.query_one("#spinner", SpinnerWidget)
 
         expanded, attachments, att_warnings = collect_prompt_attachments(
             raw, self._state.cwd
         )
 
-        chat_log.add_user_message(raw, attachments)
-
-        model = active_model_name(self._state)
-        chat_log.add_system_message(
-            f"> {self._state.backend} · {model} · mode={self._state.harness_mode}"
-        )
-
         self._reset_live_preview()
+        self._pending_display_prompt = raw
+        self._pending_display_attachments = list(attachments)
+        self._rebuild_chat_log()
         spinner.start("Thinking")
 
         self._turn_start_time = time.monotonic()
@@ -727,41 +787,20 @@ class MTPApp(App):
         self._last_live_render_at = 0.0
 
     def _render_live_preview(self, *, force: bool = False) -> None:
-        from rich.text import Text
-
         now = time.monotonic()
         if not force and now - self._last_live_render_at < 0.05:
             return
         self._last_live_render_at = now
-
-        cmd_log = self.query_one("#cmd-log", RichLog)
-        cmd_log.clear()
-        cmd_log.add_class("visible")
-
-        if self._live_status:
-            cmd_log.write(Text(f"  > {self._live_status}", style="#818cf8"))
-
-        if self._live_tool_events:
-            cmd_log.write(Text("  Tools", style="bold #c084fc"))
-            for event in self._live_tool_events[-8:]:
-                cmd_log.write(Text(f"    {event}", style="#2dd4bf"))
-
-        if self._live_reasoning.strip():
-            cmd_log.write(Text("  Reasoning", style="bold #38bdf8"))
-            cmd_log.write(Text(f"    {self._live_reasoning[-2500:]}", style="#71717a"))
-
-        if self._live_text:
-            cmd_log.write(Text("  Agent", style="bold #c084fc"))
-            cmd_log.write(Text(f"    {self._live_text}", style="#f4f4f6"))
-
-        for warning in self._live_warnings[-4:]:
-            cmd_log.write(Text(f"  ! {warning}", style="bold #fbbf24"))
+        self._rebuild_chat_log()
 
     def _handle_live_event(self, kind: str, message: str) -> None:
         spinner = self.query_one("#spinner", SpinnerWidget)
         if kind == "status":
-            self._live_status = message
-            spinner.update_label(message or "Thinking")
+            if message in {"Sending request to provider...", "Processing response..."}:
+                self._live_status = ""
+            else:
+                self._live_status = message
+                spinner.update_label(message or "Thinking")
         elif kind in {"tool", "tool_end"}:
             self._live_tool_events.append(message)
             self._state.last_tool_events = list(self._live_tool_events)
@@ -836,14 +875,6 @@ class MTPApp(App):
 
         if event.state == WorkerState.SUCCESS:
             spinner.stop()
-            self._render_live_preview(force=True)
-            self._reset_live_preview()
-            try:
-                cmd_log = self.query_one("#cmd-log", RichLog)
-                cmd_log.clear()
-                cmd_log.remove_class("visible")
-            except Exception:
-                pass
             result: ChatResult = event.worker.result
 
             # Record the turn with the original raw prompt
@@ -857,51 +888,31 @@ class MTPApp(App):
                 )
                 save_tui_session(self._state)
 
-            # Extract thinking from usage lines
-            thinking = ""
-            for uline in result.usage_lines:
-                if uline.startswith("thinking="):
-                    thinking = uline.replace("thinking=", "").strip()
-                    break
-
-            # Calculate elapsed time
-            elapsed = time.monotonic() - getattr(self, "_turn_start_time", time.monotonic())
-
-            # Render response
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_assistant_message(ChatMessage(
-                role="assistant", text=result.text,
-                model=active_model_name(self._state),
-                backend=self._state.backend,
-                tool_events=result.tool_events,
-                warnings=result.warnings,
-                usage_lines=result.usage_lines,
-                thinking=thinking,
-                duration_sec=elapsed,
-            ))
-
             self._state.last_tool_events = list(result.tool_events)
             self._state.last_warnings = list(result.warnings)
+            self._clear_pending_turn_display()
+            self._reset_live_preview()
+            self._rebuild_chat_log()
             self._refresh_status_bar()
             self._refresh_sidebar()
 
         elif event.state == WorkerState.ERROR:
             spinner.stop()
-            self._render_live_preview(force=True)
+            self._clear_pending_turn_display()
             self._reset_live_preview()
+            self._rebuild_chat_log()
             self.query_one("#chat-log", ChatLog).add_system_message(
-                f"⚡ Error: {event.worker.error}", style="bold #f43f5e"
+                f"Error: {event.worker.error}", style="bold #f43f5e"
             )
 
         elif event.state == WorkerState.CANCELLED:
             spinner.stop()
-            self._render_live_preview(force=True)
+            self._clear_pending_turn_display()
             self._reset_live_preview()
+            self._rebuild_chat_log()
             self.query_one("#chat-log", ChatLog).add_system_message(
-                "⚡ Request cancelled.", style="#fbbf24"
+                "Request cancelled.", style="#fbbf24"
             )
-
-    # ── Command dispatch (from slash commands and CommandPalette) ─────────
 
     def action_cmd_dispatch(self, cmd: str, arg: str) -> None:
         """Central action handler called by CommandPalette entries."""
@@ -990,6 +1001,9 @@ class MTPApp(App):
             s.agent = None
             s.codex_session_id = None
             save_tui_session(s)
+            self._clear_pending_turn_display()
+            self._reset_live_preview()
+            self._rebuild_chat_log()
             chat_log.add_command_result(
                 f"✓ New session {s.session_id}" + (f" ({arg})" if arg else "")
             )
@@ -1043,14 +1057,6 @@ class MTPApp(App):
             self._refresh_status_bar()
             self._refresh_sidebar()
             return
-            resolved = resolve_reasoning(arg) if arg else None
-            if resolved:
-                s.reasoning_effort = resolved
-                save_tui_session(s)
-                chat_log.add_command_result(f"✓ Reasoning set to {resolved}")
-            else:
-                chat_log.add_command_result("Usage: /reasoning <none|low|medium|high|xhigh>")
-            self._refresh_status_bar()
         elif cmd == "mode":
             from .tui_harness_policy import normalize_harness_mode, HARNESS_MODES
             if not arg:
@@ -1475,6 +1481,8 @@ class MTPApp(App):
         self._refresh_sidebar()
 
     def action_clear_chat(self) -> None:
+        self._clear_pending_turn_display()
+        self._reset_live_preview()
         self.query_one("#chat-log", ChatLog).clear()
 
     def action_cycle_sandbox(self) -> None:
