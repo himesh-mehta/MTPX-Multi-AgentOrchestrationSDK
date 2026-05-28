@@ -10,6 +10,7 @@ from typing import Iterable
 
 from .doctor import run_doctor
 from ..agent_os import launch as launch_agent_os
+from ..codebase import CodebaseMemory
 from .providers import get_provider, providers_as_rows
 from .scaffold import VALID_TEMPLATES, scaffold_project
 from .tui import run_tui
@@ -149,6 +150,83 @@ def _cmd_agent_os(_args: argparse.Namespace) -> int:
     return int(launch_agent_os())
 
 
+def _prompt_codebase_root(start: Path) -> Path:
+    suggested = CodebaseMemory.discover_root(start)
+    print(f"Current folder: {start.resolve()}")
+    if suggested != start.resolve():
+        print(f"Detected project root: {suggested}")
+    raw = input("Press Enter to use this root, or enter another path: ").strip()
+    root = Path(raw).expanduser() if raw else suggested
+    root = root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise FileNotFoundError(f"Project root not found: {root}")
+    return root
+
+
+def _cmd_codebase_memory(args: argparse.Namespace) -> int:
+    try:
+        root = Path(args.path).expanduser().resolve() if args.path else _prompt_codebase_root(Path.cwd())
+        memory = CodebaseMemory(root)
+        if args.off:
+            memory.set_enabled(False)
+            print(f"Codebase memory OFF for {root}")
+            return 0
+
+        enabled = args.on
+        if not args.on:
+            choice = input("Codebase memory: [on/off]: ").strip().lower()
+            if choice not in {"on", "off"}:
+                print("Expected 'on' or 'off'.", file=sys.stderr)
+                return 1
+            enabled = choice == "on"
+        if not enabled:
+            memory.set_enabled(False)
+            print(f"Codebase memory OFF for {root}")
+            return 0
+
+        last_percent = {"value": -1}
+
+        def progress(stats) -> None:
+            if stats.percent == last_percent["value"]:
+                return
+            last_percent["value"] = stats.percent
+            print(
+                f"\rScanning codebase... {stats.percent:3d}% "
+                f"files={stats.files_seen} changed={stats.changed_files} skipped={stats.files_skipped}",
+                end="",
+                flush=True,
+            )
+
+        stats = memory.scan(enable=True, progress=progress)
+        print()
+        print(
+            "Codebase memory scan complete: "
+            f"100% files={stats.files_indexed} changed={stats.changed_files} "
+            f"deleted={stats.files_deleted} chunks={stats.chunks_indexed}"
+        )
+        print(f"Saved memory database: {memory.db_path}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"Codebase memory failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_codebase_status(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve() if args.path else CodebaseMemory.discover_root(Path.cwd())
+    status = CodebaseMemory(root).status()
+    rows = [
+        ["root", str(status.root)],
+        ["enabled", str(status.enabled)],
+        ["db", str(status.db_path)],
+        ["files", str(status.file_count)],
+        ["chunks", str(status.chunk_count)],
+        ["conversation_summaries", str(status.summary_count)],
+        ["last_scan_at", status.last_scan_at or "(never)"],
+    ]
+    _print_table(["key", "value"], rows)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mtp",
@@ -250,6 +328,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_os_cmd = sub.add_parser("agent-os", help="Launch Streamlit Agent OS UI.")
     agent_os_cmd.set_defaults(handler=_cmd_agent_os)
+
+    codebase_cmd = sub.add_parser("codebase", help="Codebase memory and indexing commands.")
+    codebase_sub = codebase_cmd.add_subparsers(dest="codebase_command", required=True)
+    memory_cmd = codebase_sub.add_parser("memory", help="Turn codebase memory on/off and scan the project.")
+    memory_cmd.add_argument("--path", default=None, help="Project root to index. Defaults to detected root.")
+    memory_state = memory_cmd.add_mutually_exclusive_group()
+    memory_state.add_argument("--on", action="store_true", help="Enable memory and scan without prompting.")
+    memory_state.add_argument("--off", action="store_true", help="Disable memory without scanning.")
+    memory_cmd.set_defaults(handler=_cmd_codebase_memory)
+
+    codebase_status = codebase_sub.add_parser("status", help="Show codebase memory status.")
+    codebase_status.add_argument("--path", default=None, help="Project root. Defaults to detected root.")
+    codebase_status.set_defaults(handler=_cmd_codebase_status)
 
     return parser
 

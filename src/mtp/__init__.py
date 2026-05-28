@@ -45,6 +45,7 @@ from .toolkits import (
     register_local_toolkits,
 )
 from .transport import HTTPTransportServer, run_stdio_transport
+from .codebase import CodebaseMemory, CodebaseMemoryToolkit
 
 try:
     from .transport import WebSocketTransportServer, run_ws_transport
@@ -64,7 +65,7 @@ from .mcp import (
 )
 from .mcp_transport import MCPHTTPTransportServer, MCPWebSocketTransportServer, run_mcp_http, run_mcp_ws
 
-__version__ = "0.1.28"
+__version__ = "0.1.29"
 
 # Convenience aliases for minimal import style:
 # from mtp import Agent
@@ -87,6 +88,8 @@ Agent.RetryAgentRun = RetryAgentRun
 Agent.StopAgentRun = StopAgentRun
 Agent.register_local_toolkits = staticmethod(register_local_toolkits)
 Agent.load_dotenv_if_available = staticmethod(load_dotenv_if_available)
+Agent.CodebaseMemory = CodebaseMemory
+Agent.CodebaseMemoryToolkit = CodebaseMemoryToolkit
 
 __all__ = [
     "__version__",
@@ -156,6 +159,8 @@ __all__ = [
     "StrictViolation",
     "validate_strict_dependencies",
     "load_dotenv_if_available",
+    "CodebaseMemory",
+    "CodebaseMemoryToolkit",
     "validate_execution_plan",
     "validate_tool_arguments",
     "ToolArgumentsValidationError",
