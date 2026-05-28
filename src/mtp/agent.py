@@ -554,6 +554,26 @@ class Agent:
             return content.strip()
         return None
 
+    def _assistant_message_for_action(self, action: AgentAction) -> dict[str, Any]:
+        metadata = action.metadata if isinstance(action.metadata, dict) else {}
+        assistant_message = metadata.get("assistant_message")
+        if isinstance(assistant_message, dict):
+            return assistant_message
+        return {"role": "assistant", "content": action.response_text or ""}
+
+    def _finalize_assistant_message(self, final_text: str) -> dict[str, Any]:
+        assistant_message = getattr(self.provider, "_last_finalize_message", None)
+        if isinstance(assistant_message, dict):
+            return assistant_message
+        return {"role": "assistant", "content": final_text}
+
+    def _finalize_reasoning_text(self) -> str | None:
+        for attr_name in ("_last_stream_reasoning", "_last_finalize_reasoning"):
+            value = getattr(self.provider, attr_name, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
     def _trim_cacheable_repeated_tool_calls(
         self,
         plan: ExecutionPlan,
@@ -1028,7 +1048,7 @@ class Agent:
             if action.response_text and action.plan is None:
                 self._debug("provider returned direct response (no tool plan)")
                 self._debug(f"assistant_response={self._short(action.response_text)}")
-                self._append_message({"role": "assistant", "content": action.response_text})
+                self._append_message(self._assistant_message_for_action(action))
                 if self.autoresearch:
                     self._debug("autoresearch mode active; continuing after direct response")
                     continue
@@ -1205,7 +1225,7 @@ class Agent:
             else:
                 self._debug("calling provider.finalize")
                 final_text = self.provider.finalize(self.messages, last_results)
-                self._append_message({"role": "assistant", "content": final_text})
+                self._append_message(self._finalize_assistant_message(final_text))
                 self._debug(f"final response generated text={self._short(final_text)}")
 
             final_text, refine_error = self._refine_output(
@@ -1403,7 +1423,7 @@ class Agent:
             action = await self._anext_action(planning_tools)
             self._normalize_plan_reasoning(action.plan, tools)
             if action.response_text and action.plan is None:
-                self._append_message({"role": "assistant", "content": action.response_text})
+                self._append_message(self._assistant_message_for_action(action))
                 if self.autoresearch:
                     continue
                 return last_results, action.response_text, cancelled, total_tool_calls, paused, None
@@ -1550,7 +1570,7 @@ class Agent:
                 final_text = direct_response
             else:
                 final_text = await self._afinalize(last_results)
-                self._append_message({"role": "assistant", "content": final_text})
+                self._append_message(self._finalize_assistant_message(final_text))
 
             final_text, refine_error = await self._arefine_output(
                 final_text,
@@ -1753,7 +1773,7 @@ class Agent:
             finalize_stream = getattr(self.provider, "finalize_stream", None)
             if not callable(finalize_stream):
                 final_text = self.provider.finalize(self.messages, last_results)
-                self._append_message({"role": "assistant", "content": final_text})
+                self._append_message(self._finalize_assistant_message(final_text))
                 self._debug(f"final response generated text={self._short(final_text)}")
                 yield final_text
                 return
@@ -1769,7 +1789,7 @@ class Agent:
                     chunks.append(chunk)
                     yield chunk
             final_text = "".join(chunks)
-            self._append_message({"role": "assistant", "content": final_text})
+            self._append_message(self._finalize_assistant_message(final_text))
             self._debug(f"final streamed response generated text={self._short(final_text)}")
         finally:
             self._complete_run(resolved_run_id)
@@ -1905,7 +1925,7 @@ class Agent:
                 )
 
                 if action.response_text and action.plan is None:
-                    self._append_message({"role": "assistant", "content": action.response_text})
+                    self._append_message(self._assistant_message_for_action(action))
                     if self.autoresearch:
                         if stream_final and not chunks_streamed:
                             for chunk in self._chunk_text(action.response_text):
@@ -2128,6 +2148,7 @@ class Agent:
             finalize_rate_limits = getattr(self.provider, "_last_stream_rate_limits", None)
             if not isinstance(finalize_rate_limits, dict):
                 finalize_rate_limits = getattr(self.provider, "_last_finalize_rate_limits", None)
+            finalize_reasoning = self._finalize_reasoning_text()
             model_name = getattr(self.provider, "model", None) or getattr(self.provider, "model_name", None)
             yield events.emit(
                 "llm_response",
@@ -2137,11 +2158,12 @@ class Agent:
                 model=model_name,
                 usage=finalize_usage if isinstance(finalize_usage, dict) else None,
                 rate_limits=finalize_rate_limits if isinstance(finalize_rate_limits, dict) else None,
+                reasoning=finalize_reasoning,
                 duration_seconds=finalize_duration,
                 has_plan=False,
                 has_response=True,
             )
-            self._append_message({"role": "assistant", "content": final_text})
+            self._append_message(self._finalize_assistant_message(final_text))
             yield events.emit("run_completed", final_text=final_text, rounds=max_rounds, total_tool_calls=total_tool_calls)
         except Exception as exc:  # noqa: BLE001
             yield events.emit(
@@ -2285,7 +2307,7 @@ class Agent:
                 )
 
                 if action.response_text and action.plan is None:
-                    self._append_message({"role": "assistant", "content": action.response_text})
+                    self._append_message(self._assistant_message_for_action(action))
                     if self.autoresearch:
                         if stream_final and not chunks_streamed:
                             for chunk in self._chunk_text(action.response_text):
@@ -2507,6 +2529,7 @@ class Agent:
             finalize_rate_limits = getattr(self.provider, "_last_stream_rate_limits", None)
             if not isinstance(finalize_rate_limits, dict):
                 finalize_rate_limits = getattr(self.provider, "_last_finalize_rate_limits", None)
+            finalize_reasoning = self._finalize_reasoning_text()
             model_name = getattr(self.provider, "model", None) or getattr(self.provider, "model_name", None)
             yield events.emit(
                 "llm_response",
@@ -2516,11 +2539,12 @@ class Agent:
                 model=model_name,
                 usage=finalize_usage if isinstance(finalize_usage, dict) else None,
                 rate_limits=finalize_rate_limits if isinstance(finalize_rate_limits, dict) else None,
+                reasoning=finalize_reasoning,
                 duration_seconds=finalize_duration,
                 has_plan=False,
                 has_response=True,
             )
-            self._append_message({"role": "assistant", "content": final_text})
+            self._append_message(self._finalize_assistant_message(final_text))
             yield events.emit("run_completed", final_text=final_text, rounds=max_rounds, total_tool_calls=total_tool_calls)
         except Exception as exc:  # noqa: BLE001
             yield events.emit(

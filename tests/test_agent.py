@@ -55,6 +55,23 @@ class _DirectResponseProvider(ProviderAdapter):
         return self.text
 
 
+class _DirectResponseWithAssistantMetadataProvider(ProviderAdapter):
+    def next_action(self, messages: list[dict], tools: list[ToolSpec]) -> AgentAction:
+        return AgentAction(
+            response_text="ok",
+            metadata={
+                "assistant_message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "reasoning_content": "Need a concise direct reply.",
+                }
+            },
+        )
+
+    def finalize(self, messages: list[dict], tool_results: list[ToolResult]) -> str:
+        return "ok"
+
+
 class _PlanThenRespondProvider(ProviderAdapter):
     def __init__(self, *, reasoning: str | None = None) -> None:
         self._step = 0
@@ -125,7 +142,7 @@ class _PlanWithReasoningArgProvider(ProviderAdapter):
                     ]
                 )
             )
-        return AgentAction(response_text="done")
+        return AgentAction()
 
     def finalize(self, messages: list[dict], tool_results: list[ToolResult]) -> str:
         return "done"
@@ -155,7 +172,7 @@ class _PlanWithGenericAndPerCallReasoningProvider(ProviderAdapter):
                     ]
                 )
             )
-        return AgentAction(response_text="done")
+        return AgentAction()
 
     def finalize(self, messages: list[dict], tool_results: list[ToolResult]) -> str:
         return "done"
@@ -167,6 +184,37 @@ class _FailingProvider(ProviderAdapter):
 
     def finalize(self, messages: list[dict], tool_results: list[ToolResult]) -> str:
         return "never"
+
+
+class _FinalizeMetadataProvider(ProviderAdapter):
+    def __init__(self) -> None:
+        self._step = 0
+        self._last_finalize_message: dict[str, str] | None = None
+        self._last_finalize_reasoning: str | None = None
+
+    def next_action(self, messages: list[dict], tools: list[ToolSpec]) -> AgentAction:
+        if self._step == 0:
+            self._step += 1
+            return AgentAction(
+                plan=ExecutionPlan(
+                    batches=[
+                        ToolBatch(
+                            mode="parallel",
+                            calls=[ToolCall(id="call-1", name="echo.tool", arguments={"text": "hello"})],
+                        )
+                    ]
+                )
+            )
+        return AgentAction()
+
+    def finalize(self, messages: list[dict], tool_results: list[ToolResult]) -> str:
+        self._last_finalize_reasoning = "Need to summarize the tool output."
+        self._last_finalize_message = {
+            "role": "assistant",
+            "content": "done",
+            "reasoning_content": self._last_finalize_reasoning,
+        }
+        return "done"
 
 
 class AgentTests(unittest.TestCase):
@@ -373,6 +421,22 @@ class AgentTests(unittest.TestCase):
         events = list(agent.run_loop_events("hello", max_rounds=2, stream_final=False))
         tool_started = next(event for event in events if event["type"] == "tool_started")
         self.assertEqual(tool_started.get("reasoning"), "Per-call: run echo first")
+
+    def test_direct_response_metadata_is_preserved_in_message_history(self) -> None:
+        agent = Agent(provider=_DirectResponseWithAssistantMetadataProvider(), tools=ToolRegistry())
+        response = agent.run("hello")
+        self.assertEqual(response, "ok")
+        assistant_messages = [msg for msg in agent.messages if msg.get("role") == "assistant"]
+        self.assertTrue(assistant_messages)
+        self.assertEqual(assistant_messages[-1]["reasoning_content"], "Need a concise direct reply.")
+
+    def test_finalize_metadata_reasoning_is_preserved_in_message_history(self) -> None:
+        reg = ToolRegistry()
+        reg.register_tool(ToolSpec(name="echo.tool", description=""), lambda text: f"echo:{text}")
+        agent = Agent(provider=_FinalizeMetadataProvider(), tools=reg)
+        agent.run_loop("hello", max_rounds=2)
+        assistant_messages = [msg for msg in agent.messages if msg.get("role") == "assistant"]
+        self.assertEqual(assistant_messages[-1]["reasoning_content"], "Need to summarize the tool output.")
 
 
 if __name__ == "__main__":
