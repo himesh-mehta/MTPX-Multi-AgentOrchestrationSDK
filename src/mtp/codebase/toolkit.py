@@ -35,8 +35,8 @@ class CodebaseMemoryToolkit(ToolkitLoader):
             ),
             ToolSpec(
                 "codebase.search",
-                "Search indexed codebase memory with fuzzy and semantic matching. Returns relevant snippets and line ranges.",
-                _schema({"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
+                "Search indexed codebase memory with fuzzy and semantic matching. Returns relevant snippets and line ranges. Use `query` for the search text; `pattern` is accepted as an alias.",
+                _schema({"query": {"type": "string"}, "pattern": {"type": "string"}, "limit": {"type": "integer"}}),
                 risk_level=ToolRiskLevel.READ_ONLY,
             ),
             ToolSpec(
@@ -62,7 +62,10 @@ class CodebaseMemoryToolkit(ToolkitLoader):
                 "last_scan_at": data.last_scan_at,
             }
 
-        def search(query: str, limit: int = 20) -> dict[str, Any]:
+        def search(query: str | None = None, limit: int = 20, pattern: str | None = None) -> dict[str, Any]:
+            query = (query or pattern or "").strip()
+            if not query:
+                raise ValueError("codebase.search requires `query` (or alias `pattern`).")
             hits = self.memory.search(query, limit=limit)
             return {
                 "query": query,

@@ -33,6 +33,18 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
     }
 
 
+def _query_schema(*, include_path: bool = True, include_limit: bool = True) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "query": {"type": "string"},
+        "pattern": {"type": "string"},
+    }
+    if include_path:
+        properties["path"] = {"type": "string"}
+    if include_limit:
+        properties["limit"] = {"type": "integer"}
+    return _schema(properties)
+
+
 class _Workspace:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
@@ -79,11 +91,11 @@ class ContextToolkit(ToolkitLoader):
     def list_tool_specs(self) -> list[ToolSpec]:
         return [
             ToolSpec("project.inspect", "Inspect the workspace root, count source file formats, and report concise git status. Returns counts only for files, never a recursive file list.", _schema({}), risk_level=ToolRiskLevel.READ_ONLY, cache_ttl_seconds=15),
-            ToolSpec("fs.search", "Find relevant files by word, text, fuzzy, and lightweight semantic matching. Returns relative paths from the workspace root.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("fs.grep", "Search indexed codebase memory first, then live files, and return relevant matching snippets.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("fs.search", "Find relevant files by word, text, fuzzy, and lightweight semantic matching. Use `query` for the search text; `pattern` is accepted as an alias.", _query_schema(), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("fs.grep", "Search indexed codebase memory first, then live files, and return relevant matching snippets. Use `query` for the search text; `pattern` is accepted as an alias.", _query_schema(), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("fs.read_text", "Read a bounded line window from a workspace text file by relative path.", _schema({"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("agent.explore_codebase", "Subagent-style deep codebase search. Use for broad grep and locating relevant files.", _schema({"task": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}}, ["task"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("agent.debug_context", "Subagent-style debug context gatherer: project summary, git diff, and likely files.", _schema({"symptom": {"type": "string"}, "query": {"type": "string"}}, ["symptom"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("agent.explore_codebase", "Subagent-style deep codebase search. Use for broad grep and locating relevant files. Use `query` for the search text; `pattern` is accepted as an alias.", _schema({"task": {"type": "string"}, "query": {"type": "string"}, "pattern": {"type": "string"}, "limit": {"type": "integer"}}, ["task"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("agent.debug_context", "Subagent-style debug context gatherer: project summary, git diff, and likely files. Use `query` for the search text; `pattern` is accepted as an alias.", _schema({"symptom": {"type": "string"}, "query": {"type": "string"}, "pattern": {"type": "string"}}, ["symptom"]), risk_level=ToolRiskLevel.READ_ONLY),
         ]
 
     def load_tools(self) -> list[RegisteredTool]:
@@ -138,7 +150,10 @@ class ContextToolkit(ToolkitLoader):
                 "content": content,
             }
 
-        def fs_search(query: str, path: str = ".", limit: int = 80) -> dict[str, Any]:
+        def fs_search(query: str | None = None, path: str = ".", limit: int = 80, pattern: str | None = None) -> dict[str, Any]:
+            query = (query or pattern or "").strip()
+            if not query:
+                raise ValueError("fs.search requires `query` (or alias `pattern`).")
             memory = CodebaseMemory(self.ws.root)
             if path in {".", "", None} and memory.is_enabled():
                 memory_hits = memory.search(query, limit=limit)
@@ -188,15 +203,15 @@ class ContextToolkit(ToolkitLoader):
                 "hits": bounded,
             }
 
-        def fs_grep(query: str, path: str = ".", limit: int = 80) -> dict[str, Any]:
-            return fs_search(query=query, path=path, limit=limit)
+        def fs_grep(query: str | None = None, path: str = ".", limit: int = 80, pattern: str | None = None) -> dict[str, Any]:
+            return fs_search(query=query, path=path, limit=limit, pattern=pattern)
 
-        def explore_codebase(task: str, query: str = "", limit: int = 120) -> dict[str, Any]:
-            probe = query or _keywords(task)
+        def explore_codebase(task: str, query: str = "", limit: int = 120, pattern: str = "") -> dict[str, Any]:
+            probe = query or pattern or _keywords(task)
             return {"task": task, "query": probe, "hits": fs_search(probe, limit=limit), "project": project_inspect()}
 
-        def debug_context(symptom: str, query: str = "") -> dict[str, Any]:
-            probe = query or _keywords(symptom)
+        def debug_context(symptom: str, query: str = "", pattern: str = "") -> dict[str, Any]:
+            probe = query or pattern or _keywords(symptom)
             diff = _run(["git", "diff", "--", "."], self.ws.root, timeout=8).get("stdout", "")
             return {"symptom": symptom, "project": project_inspect(), "hits": fs_search(probe, limit=80), "git_diff": diff[:12000]}
 
