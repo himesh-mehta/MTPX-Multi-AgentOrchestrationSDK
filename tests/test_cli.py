@@ -96,6 +96,25 @@ class CLITests(unittest.TestCase):
             self.assertEqual(code, 0, stderr.getvalue())
             self.assertIn("hello-from-cli-run", stdout.getvalue())
 
+    def test_codebase_memory_on_scans_project(self) -> None:
+        with _workspace_tempdir() as project:
+            (project / "app.py").write_text("def memory_probe():\n    return 'needle'\n", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(["codebase", "memory", "--path", str(project), "--on"])
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertTrue((project / ".mtp" / "memory" / "codebase.sqlite").exists())
+            self.assertIn("100%", stdout.getvalue())
+
+            status_out = io.StringIO()
+            with contextlib.redirect_stdout(status_out), contextlib.redirect_stderr(io.StringIO()):
+                status_code = main(["codebase", "status", "--path", str(project)])
+            self.assertEqual(status_code, 0)
+            self.assertIn("chunks", status_out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
