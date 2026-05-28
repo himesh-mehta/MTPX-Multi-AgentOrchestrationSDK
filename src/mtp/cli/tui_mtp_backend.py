@@ -25,6 +25,24 @@ class MTPRunResult:
     usage_lines: list[str]
 
 
+def _merge_stream_text(existing: str, incoming: str) -> str:
+    """Append streamed text while avoiding obvious duplicate full-payload replays."""
+    if not incoming:
+        return existing
+    if not existing:
+        return incoming
+    if incoming in existing:
+        return existing
+    if existing in incoming:
+        return incoming
+
+    max_overlap = min(len(existing), len(incoming), 4000)
+    for size in range(max_overlap, 0, -1):
+        if existing.endswith(incoming[:size]):
+            return existing + incoming[size:]
+    return existing + incoming
+
+
 def _extract_tool_events_from_agent(agent: Agent.MTPAgent) -> list[str]:
     """
     Extract tool call events from agent's last run.
@@ -76,7 +94,7 @@ def run_mtp_prompt(
     warnings: list[str] = []
     tool_events: list[str] = []
     final_text_chunks: list[str] = []
-    thinking_chunks: list[str] = []  # Collect thinking/reasoning tokens
+    thinking_text = ""
     
     # Metrics tracking
     total_input_tokens = 0
@@ -130,7 +148,7 @@ def run_mtp_prompt(
                 # Extract reasoning/thinking tokens from metadata
                 reasoning_text = event.get("reasoning")
                 if reasoning_text and isinstance(reasoning_text, str):
-                    thinking_chunks.append(reasoning_text)
+                    thinking_text = _merge_stream_text(thinking_text, reasoning_text)
                     # Don't emit live thinking previews - will show full thinking at the end
                 
                 duration = event.get("duration_seconds", 0.0)
@@ -165,7 +183,7 @@ def run_mtp_prompt(
                         
             elif event_type == "reasoning_chunk":
                 chunk = event.get("chunk", "")
-                thinking_chunks.append(chunk)
+                thinking_text = _merge_stream_text(thinking_text, chunk)
                 if emit_live:
                     emit_live("reasoning", chunk)
 
@@ -230,10 +248,8 @@ def run_mtp_prompt(
             )
             
             # Thinking tokens (if any) - show full text, not truncated
-            if thinking_chunks:
-                thinking_text = " | ".join(thinking_chunks)
-                # Don't truncate - show full thinking process
-                usage_lines.append(f"thinking={thinking_text}")
+            if thinking_text.strip():
+                usage_lines.append(f"thinking={thinking_text.strip()}")
             
             # Cache tokens (only if any cache tokens exist)
             if any([cached_input_tokens, cache_write_tokens, cache_creation_input_tokens, cache_read_input_tokens]):

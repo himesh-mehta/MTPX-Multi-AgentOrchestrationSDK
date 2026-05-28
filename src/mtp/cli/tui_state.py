@@ -20,7 +20,7 @@ from mtp import Agent, JsonSessionStore, SessionRecord
 BACKENDS = {
     "codex", "openai", "groq", "claude", "gemini", "openrouter",
     "mistral", "cohere", "sambanova", "cerebras", "deepseek",
-    "togetherai", "fireworksai",
+    "togetherai", "fireworksai", "xiaomi",
 }
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 MAX_ATTACHMENTS = 8
