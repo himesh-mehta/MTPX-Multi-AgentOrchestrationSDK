@@ -78,6 +78,24 @@ def record_turn(state: TUIState, prompt: str, result: ChatResult) -> None:
     ))
     state.last_usage_lines = list(result.usage_lines)
     save_tui_session(state)
+    _record_codebase_conversation_summary(state, prompt, result)
+
+
+def _record_codebase_conversation_summary(state: TUIState, prompt: str, result: ChatResult) -> None:
+    """Store a lightweight post-turn summary when codebase memory is enabled."""
+    try:
+        from mtp.codebase import CodebaseMemory
+
+        memory = CodebaseMemory(state.cwd)
+        memory.record_conversation_summary(
+            session_id=state.session_id,
+            prompt=prompt,
+            response=result.text,
+            backend=state.backend,
+            model=active_model_name(state),
+        )
+    except Exception:
+        return
 
 
 # ── Attachment collection ────────────────────────────────────────────────────
