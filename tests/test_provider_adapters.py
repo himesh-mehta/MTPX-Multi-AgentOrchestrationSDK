@@ -4,9 +4,11 @@ import pathlib
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
+from mtp.agent import AgentAction
 from mtp.protocol import ToolSpec
 from mtp.media import Audio, File, Image, Video
 from mtp.providers import (
@@ -34,9 +36,10 @@ class _ToolCall:
 
 
 class _OpenAIMessage:
-    def __init__(self, content: str, tool_calls=None) -> None:
+    def __init__(self, content: str, tool_calls=None, reasoning_content: str | None = None) -> None:
         self.content = content
         self.tool_calls = tool_calls
+        self.reasoning_content = reasoning_content
 
 
 class _OpenAIResponse:
@@ -57,8 +60,28 @@ class _FakeOpenAIClient:
 
 
 class _FakeOpenAIStreamChunk:
-    def __init__(self, content: str) -> None:
-        self.choices = [SimpleNamespace(delta=SimpleNamespace(content=content))]
+    def __init__(
+        self,
+        content: str = "",
+        *,
+        reasoning_content: str | None = None,
+        tool_calls: list[Any] | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        delta = SimpleNamespace(content=content or None)
+        if reasoning_content is not None:
+            delta.reasoning_content = reasoning_content
+        if tool_calls is not None:
+            delta.tool_calls = tool_calls
+        self.choices = [SimpleNamespace(delta=delta)]
+        self.usage = usage
+
+
+class _FakeStreamToolCallDelta:
+    def __init__(self, *, index: int, call_id: str | None = None, name: str | None = None, arguments: str | None = None) -> None:
+        self.index = index
+        self.id = call_id
+        self.function = SimpleNamespace(name=name, arguments=arguments)
 
 
 class _AnthropicContent:
@@ -157,6 +180,22 @@ class _FakeOllamaClient:
             "prompt_eval_count": 11,
             "eval_count": 4,
         }
+
+
+class _FakeXiaomiClient:
+    def __init__(self, responses: list[Any]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self._responses:
+            raise AssertionError("No fake Xiaomi responses left")
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class ProviderAdapterTests(unittest.TestCase):
@@ -326,6 +365,124 @@ class ProviderAdapterTests(unittest.TestCase):
         provider = OllamaToolCallingProvider(client=_FakeOllamaClient())
         output = "".join(provider.finalize_stream(messages=[{"role": "user", "content": "hi"}], tool_results=[]))
         self.assertEqual(output, "hello world")
+
+    def test_xiaomi_next_action_preserves_reasoning_content(self) -> None:
+        fake = _FakeXiaomiClient(
+            [
+                _OpenAIResponse(
+                    _OpenAIMessage(
+                        "I'll search first.",
+                        [_ToolCall("c1", "fs.search", "{\"query\": \"spinner widgets\"}")],
+                        reasoning_content="Need to inspect the spinner-related files before answering.",
+                    )
+                )
+            ]
+        )
+        provider = XiaomiToolCallingProvider(client=fake)
+        action = provider.next_action(
+            messages=[{"role": "user", "content": "inspect"}],
+            tools=[ToolSpec(name="fs.search", description="x", input_schema={"type": "object"})],
+        )
+        self.assertIsNotNone(action.plan)
+        self.assertEqual(action.metadata["reasoning"], "Need to inspect the spinner-related files before answering.")
+        assistant_message = action.metadata["assistant_tool_message"]
+        self.assertEqual(
+            assistant_message["reasoning_content"],
+            "Need to inspect the spinner-related files before answering.",
+        )
+
+    def test_xiaomi_stream_next_action_streams_reasoning_and_tool_calls(self) -> None:
+        fake = _FakeXiaomiClient(
+            [
+                [
+                    _FakeOpenAIStreamChunk(reasoning_content="Need to search first. "),
+                    _FakeOpenAIStreamChunk(content="I'll inspect the project. "),
+                    _FakeOpenAIStreamChunk(
+                        tool_calls=[
+                            _FakeStreamToolCallDelta(
+                                index=0,
+                                call_id="call_1",
+                                name="fs.search",
+                                arguments="{\"query\": \"spinner widgets\"}",
+                            )
+                        ]
+                    ),
+                    _FakeOpenAIStreamChunk(
+                        usage={
+                            "prompt_tokens": 10,
+                            "completion_tokens": 5,
+                            "total_tokens": 15,
+                            "completion_tokens_details": {"reasoning_tokens": 3},
+                        }
+                    ),
+                ]
+            ]
+        )
+        provider = XiaomiToolCallingProvider(client=fake)
+        chunks = list(
+            provider.stream_next_action(
+                messages=[{"role": "user", "content": "inspect"}],
+                tools=[ToolSpec(name="fs.search", description="x", input_schema={"type": "object"})],
+            )
+        )
+        self.assertEqual(chunks[0], {"type": "reasoning_chunk", "chunk": "Need to search first. "})
+        self.assertEqual(chunks[1], {"type": "text_chunk", "chunk": "I'll inspect the project. "})
+        action = chunks[-1]
+        assert isinstance(action, AgentAction)
+        self.assertIsNotNone(action.plan)
+        self.assertEqual(action.plan.batches[0].calls[0].name, "fs.search")
+        self.assertEqual(action.metadata["usage"]["reasoning_tokens"], 3)
+        request_args = fake.calls[0]
+        self.assertTrue(request_args["stream"])
+        self.assertEqual(request_args["stream_options"], {"include_usage": True})
+        self.assertEqual(request_args["extra_body"]["thinking"]["type"], "enabled")
+
+    def test_xiaomi_disables_thinking_after_tool_history(self) -> None:
+        fake = _FakeXiaomiClient([_OpenAIResponse(_OpenAIMessage("done"))])
+        provider = XiaomiToolCallingProvider(client=fake)
+        action = provider.next_action(
+            messages=[
+                {"role": "user", "content": "inspect"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "fs.search", "arguments": "{\"query\":\"spinner\"}"},
+                        }
+                    ],
+                    "reasoning_content": "Prior reasoning",
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"hits\": []}"},
+            ],
+            tools=[ToolSpec(name="fs.read_text", description="x", input_schema={"type": "object"})],
+        )
+        self.assertEqual(fake.calls[0]["extra_body"]["thinking"]["type"], "disabled")
+        self.assertIsNone(action.response_text)
+        self.assertIsNone(action.plan)
+
+    def test_xiaomi_inline_tool_call_fallback_parses_text_payload(self) -> None:
+        fake = _FakeXiaomiClient(
+            [
+                _OpenAIResponse(
+                    _OpenAIMessage(
+                        "<tool_call>\n<function=fs.read_text>\n<parameter=path>src/app.py</parameter>\n</function>\n</tool_call>",
+                        reasoning_content="Need to open the file before answering.",
+                    )
+                )
+            ]
+        )
+        provider = XiaomiToolCallingProvider(client=fake)
+        action = provider.next_action(
+            messages=[{"role": "user", "content": "inspect"}],
+            tools=[ToolSpec(name="fs.read_text", description="x", input_schema={"type": "object"})],
+        )
+        self.assertIsNotNone(action.plan)
+        assert action.plan is not None
+        self.assertEqual(action.plan.batches[0].calls[0].name, "fs.read_text")
+        self.assertEqual(action.plan.batches[0].calls[0].arguments["path"], "src/app.py")
 
 
 if __name__ == "__main__":
