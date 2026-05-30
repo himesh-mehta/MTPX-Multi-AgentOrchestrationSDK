@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from itertools import count
 from datetime import UTC, datetime
 import json
 import re
@@ -88,7 +89,6 @@ class ProviderAdapter(Protocol):
 _AGENT_MODES = {"standalone", "member", "delegator", "orchestration"}
 _ORCHESTRATOR_MODES = {"delegator", "orchestration"}
 _AUTORESEARCH_TERMINATION_PREFIX = "__mtp_autoresearch_terminate__:"
-_AUTORESEARCH_DEFAULT_MAX_ROUNDS = 100
 
 
 class Agent:
@@ -337,11 +337,12 @@ class Agent:
         return {"reason": reason, "summary": summary}
 
     def _resolve_max_rounds(self, max_rounds: int) -> int:
-        if not self.autoresearch:
-            return max_rounds
-        if max_rounds == 5:
-            return _AUTORESEARCH_DEFAULT_MAX_ROUNDS
         return max_rounds
+
+    def _round_indices(self, max_rounds: int) -> Iterator[int]:
+        if self.autoresearch:
+            return count(1)
+        return iter(range(1, max_rounds + 1))
 
     def _build_member_tool(self, member_name: str, member: "Agent") -> RegisteredTool:
         async def delegate_to_member(
@@ -1061,7 +1062,7 @@ class Agent:
         total_tool_calls = 0
         paused = False
 
-        for round_idx in range(1, max_rounds + 1):
+        for round_idx in self._round_indices(max_rounds):
             if self._is_cancelled(run_id):
                 cancelled = True
                 break
@@ -1453,7 +1454,7 @@ class Agent:
         total_tool_calls = 0
         paused = False
 
-        for _round_idx in range(1, max_rounds + 1):
+        for _round_idx in self._round_indices(max_rounds):
             if self._is_cancelled(run_id):
                 cancelled = True
                 break
@@ -1923,7 +1924,7 @@ class Agent:
         current_round = 0
         seen_cacheable_tool_calls: set[tuple[str, str]] = set()
         try:
-            for round_idx in range(1, max_rounds + 1):
+            for round_idx in self._round_indices(max_rounds):
                 current_round = round_idx
                 if self._is_cancelled(resolved_run_id):
                     yield events.emit("run_cancelled", round=round_idx)
@@ -2295,7 +2296,7 @@ class Agent:
         current_round = 0
         seen_cacheable_tool_calls: set[tuple[str, str]] = set()
         try:
-            for round_idx in range(1, max_rounds + 1):
+            for round_idx in self._round_indices(max_rounds):
                 current_round = round_idx
                 if self._is_cancelled(resolved_run_id):
                     yield events.emit("run_cancelled", round=round_idx)
