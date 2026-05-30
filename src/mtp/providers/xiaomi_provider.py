@@ -16,7 +16,6 @@ from .common import (
     extract_usage_metrics,
     format_openai_like_message,
     normalize_refs,
-    parse_inline_tool_calls,
     safe_load_arguments,
 )
 
@@ -183,6 +182,16 @@ class XiaomiToolCallingProvider(ProviderAdapter):
             return self._client.chat.completions.create(**request_args)
 
     @staticmethod
+    def _first_choice_message(response: Any) -> Any:
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise RuntimeError("Xiaomi response did not include any choices.")
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            raise RuntimeError("Xiaomi response choice did not include a message.")
+        return message
+
+    @staticmethod
     def _extract_reasoning(message: Any) -> str | None:
         reasoning = getattr(message, "reasoning_content", None)
         if isinstance(reasoning, str) and reasoning.strip():
@@ -225,7 +234,7 @@ class XiaomiToolCallingProvider(ProviderAdapter):
         mtp_calls: list[ToolCall] = []
         id_by_index: dict[int, str] = {}
         serialized_tool_calls: list[dict[str, Any]] = []
-        call_reasoning = reasoning or (content.strip() if isinstance(content, str) and content.strip() else None)
+        call_reasoning = reasoning.strip() if isinstance(reasoning, str) and reasoning.strip() else None
 
         for idx, tc in enumerate(tool_calls):
             if isinstance(tc, dict):
@@ -234,11 +243,14 @@ class XiaomiToolCallingProvider(ProviderAdapter):
                 tool_name = str(function.get("name") or tc.get("name") or "")
                 raw_arguments = function.get("arguments") or tc.get("arguments") or "{}"
             else:
-                call_id = tc.id or f"call_{idx}"
-                tool_name = tc.function.name
-                raw_arguments = tc.function.arguments or "{}"
+                function = getattr(tc, "function", None)
+                call_id = getattr(tc, "id", None) or f"call_{idx}"
+                tool_name = getattr(function, "name", "")
+                raw_arguments = getattr(function, "arguments", None) or "{}"
+            if not tool_name:
+                raise RuntimeError(f"Xiaomi tool call {call_id!r} is missing a function name.")
             id_by_index[idx] = call_id
-            parsed_args = safe_load_arguments(raw_arguments if isinstance(raw_arguments, str) else "{}")
+            parsed_args = safe_load_arguments(raw_arguments)
             if isinstance(tc, dict) and isinstance(tc.get("arguments"), dict):
                 parsed_args = tc["arguments"]
             normalized_args = normalize_refs(parsed_args, id_by_index, current_idx=idx)
@@ -287,7 +299,7 @@ class XiaomiToolCallingProvider(ProviderAdapter):
 
     def next_action(self, messages: list[dict[str, Any]], tools: list[ToolSpec]) -> AgentAction:
         response = self._create_completion(self._request_args(messages, tools, stage="plan"))
-        message = response.choices[0].message
+        message = self._first_choice_message(response)
         tool_calls = getattr(message, "tool_calls", None)
         reasoning = self._extract_reasoning(message)
         usage = extract_usage_metrics(response)
@@ -300,16 +312,6 @@ class XiaomiToolCallingProvider(ProviderAdapter):
                 reasoning=reasoning,
                 usage=usage or None,
                 tool_call_source="native_tool_calls",
-            )
-
-        inline_tool_calls, cleaned_content = parse_inline_tool_calls(content, tools)
-        if inline_tool_calls:
-            return self._tool_action_from_calls(
-                tool_calls=inline_tool_calls,
-                content=cleaned_content,
-                reasoning=reasoning,
-                usage=usage or None,
-                tool_call_source="inline_tool_call_fallback",
             )
 
         action_meta: dict[str, Any] = {"provider": "xiaomi", "model": self.model}
@@ -381,17 +383,6 @@ class XiaomiToolCallingProvider(ProviderAdapter):
             )
             return
 
-        inline_tool_calls, cleaned_content = parse_inline_tool_calls(content_acc, tools)
-        if inline_tool_calls:
-            yield self._tool_action_from_calls(
-                tool_calls=inline_tool_calls,
-                content=cleaned_content,
-                reasoning=reasoning,
-                usage=usage,
-                tool_call_source="inline_tool_call_fallback",
-            )
-            return
-
         action_meta: dict[str, Any] = {"provider": "xiaomi", "model": self.model}
         if usage:
             action_meta["usage"] = usage
@@ -405,7 +396,7 @@ class XiaomiToolCallingProvider(ProviderAdapter):
     def finalize(self, messages: list[dict[str, Any]], tool_results: list[ToolResult]) -> str:
         response = self._create_completion(self._request_args(messages, stage="finalize"))
         self._last_finalize_usage = extract_usage_metrics(response) or None
-        message = response.choices[0].message
+        message = self._first_choice_message(response)
         reasoning = self._extract_reasoning(message)
         self._last_finalize_reasoning = reasoning
         self._last_finalize_message = self._assistant_message(content=message.content or "Done.", reasoning=reasoning)

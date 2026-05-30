@@ -122,7 +122,7 @@ class LMStudioToolCallingProvider(ProviderAdapter):
             mtp_calls: list[ToolCall] = []
             id_by_index: dict[int, str] = {}
             serialized_tool_calls: list[dict[str, Any]] = []
-            call_reasoning = message.content.strip() if isinstance(message.content, str) and message.content.strip() else None
+            call_reasoning: str | None = None
             for idx, tc in enumerate(tool_calls):
                 call_id = tc.id or f"call_{idx}"
                 id_by_index[idx] = call_id
@@ -236,7 +236,7 @@ class LMStudioToolCallingProvider(ProviderAdapter):
             mtp_calls: list[ToolCall] = []
             id_by_index: dict[int, str] = {}
             serialized_tool_calls: list[dict[str, Any]] = []
-            call_reasoning = reasoning_acc.strip() if reasoning_acc.strip() else content_acc.strip() if content_acc.strip() else None
+            call_reasoning = reasoning_acc.strip() if reasoning_acc.strip() else None
             
             for idx, tc in tool_calls_dict.items():
                 call_id = tc["id"] or f"call_{idx}"
