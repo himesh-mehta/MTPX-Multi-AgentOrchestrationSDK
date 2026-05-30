@@ -28,8 +28,8 @@ pip install "mtpx[toolkits-web]"
 # DB session stores
 pip install "mtpx[stores-db]"
 
-# All providers
-pip install "mtpx[all-providers,dotenv]"
+# Common provider SDKs
+pip install "mtpx[providers,dotenv]"
 ```
 
 ## Or from source
@@ -94,7 +94,7 @@ mtp run
 ```
 
 See full CLI reference:
-- [CLI](C:\Users\prajw\Downloads\MTP\docs\CLI.md)
+- [CLI](CLI.md)
 
 ## 3) Build your first agent
 
@@ -111,7 +111,7 @@ tools.register_toolkit_loader("file", FileToolkit(base_dir="."))
 tools.register_toolkit_loader("python", PythonToolkit(base_dir="."))
 tools.register_toolkit_loader("shell", ShellToolkit(base_dir="."))
 
-provider = Groq(model="llama-3.3-70b-versatile", strict_dependency_mode=True)
+provider = Groq(model="llama-3.3-70b-versatile")
 
 agent = Agent.MTPAgent(
     provider=provider,
@@ -181,8 +181,8 @@ Event stream includes:
 - `run_completed`
 
 Full schema:
-- [Events Contract](C:\Users\prajw\Downloads\MTP\docs\EVENTS.md)
-- [Agent API Reference](C:\Users\prajw\Downloads\MTP\docs\AGENT_API.md)
+- [Events Contract](EVENTS.md)
+- [Agent API Reference](AGENT_API.md)
 
 ## 4.1) Autoresearch mode (optional)
 
@@ -202,7 +202,6 @@ agent = Agent.MTPAgent(
 
 agent.print_response(
     "Finish the task completely and terminate only when done.",
-    max_rounds=12,
     stream=True,
     stream_events=True,
 )
@@ -211,6 +210,7 @@ agent.print_response(
 Notes:
 - In autoresearch mode, direct assistant text is treated as intermediate progress (not immediate completion).
 - Completion is expected via internal tool `agent.terminate(reason, summary)`.
+- `max_rounds` does not cap autoresearch loops; use cancellation, `tool_call_limit`, external timeouts, or `agent.terminate`.
 - Event stream includes `run_terminated` before `run_completed` when the model terminates explicitly.
 
 ## 5) Try the Interactive TUI
@@ -255,15 +255,15 @@ See [TUI Local Inference Guide](TUI_LOCAL_INFERENCE.md) for detailed TUI documen
 ## 6) Next steps
 
 - Enable persistent sessions:
-  - [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
+  - [Storage and Sessions](STORAGE.md)
 - Use local inference providers:
-  - [Local Inference](C:\Users\prajw\Downloads\MTP\docs\LOCAL_INFERENCE.md)
-  - [TUI Local Inference Guide](C:\Users\prajw\Downloads\MTP\docs\TUI_LOCAL_INFERENCE.md)
+  - [Local Inference](LOCAL_INFERENCE.md)
+  - [TUI Local Inference Guide](TUI_LOCAL_INFERENCE.md)
 - Add your own provider adapter under `src/mtp/providers/`
 - Add your own toolkit under `src/mtp/toolkits/`
 - Add a transport layer integration under `src/mtp/transport/`
 - Build custom tools from Python functions:
-  - [Creating Tools](C:\Users\prajw\Downloads\MTP\docs\CREATING_TOOLS.md)
+  - [Creating Tools](CREATING_TOOLS.md)
 
 ## Strict dependency mode
 

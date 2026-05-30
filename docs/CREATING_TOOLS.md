@@ -74,4 +74,4 @@ spec = Agent.tool_spec_from_callable(add, namespace="custom")
 - For side effects, prefer explicit user confirmation policy.
 
 Related:
-- [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
+- [Storage and Sessions](STORAGE.md)

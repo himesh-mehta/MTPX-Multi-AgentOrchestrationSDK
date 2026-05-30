@@ -48,13 +48,14 @@ Paths are constrained to the configured `base_dir`.
 - `python.run_code`
 - `python.run_file`
 
-Execution defaults to isolated subprocess mode (`python -I`) with timeout.
-Unsafe in-process `exec` mode is opt-in via `allow_unsafe_exec=True`.
+Execution uses isolated subprocess mode (`python -I`) with timeout. This is a constrained execution helper, not a security sandbox.
+
+The legacy `allow_unsafe_exec` constructor argument is accepted for compatibility but no longer enables in-process `exec`.
 
 ## `shell.*`
 - `shell.run_command`
 
-Runs commands in `base_dir` with timeout and an allowlist (`echo`, `pwd`, `ls`, `dir` by default).
+Runs bare command names in `base_dir` with timeout and an allowlist (`echo`, `pwd`, `ls`, `dir` by default). Absolute or path-qualified executables are rejected even when their basename is allowlisted.
 Use `allowed_commands=` to customize.
 
 ## Search + web-scrape toolkits
@@ -107,4 +108,4 @@ Default policy:
 Customize with `RiskPolicy` when creating `ToolRegistry`.
 
 Related:
-- [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
+- [Storage and Sessions](STORAGE.md)
