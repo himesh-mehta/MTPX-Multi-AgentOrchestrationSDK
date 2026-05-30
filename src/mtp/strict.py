@@ -36,10 +36,6 @@ def _collect_refs(value: Any) -> list[str]:
     return refs
 
 
-def _namespace(tool_name: str) -> str:
-    return tool_name.split(".", 1)[0] if "." in tool_name else tool_name
-
-
 def validate_strict_dependencies(plan: ExecutionPlan) -> list[StrictViolation]:
     """
     Enforces explicit dependency correctness for tool argument wiring.
