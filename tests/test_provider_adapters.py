@@ -15,6 +15,7 @@ from mtp.providers import (
     AnthropicToolCallingProvider,
     GeminiToolCallingProvider,
     LMStudioToolCallingProvider,
+    GroqToolCallingProvider,
     OpenAIToolCallingProvider,
     OllamaToolCallingProvider,
     OpenRouterToolCallingProvider,
@@ -57,6 +58,17 @@ class _FakeOpenAIClient:
         if self.calls == 1:
             return _OpenAIResponse(_OpenAIMessage("", [_ToolCall("c1", "x.test", "{bad json}")]))
         return _OpenAIResponse(_OpenAIMessage("done"))
+
+
+class _FakeSingleResponseOpenAIClient:
+    def __init__(self, message: _OpenAIMessage) -> None:
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+        self.message = message
+        self.calls = []
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _OpenAIResponse(self.message)
 
 
 class _FakeOpenAIStreamChunk:
@@ -544,6 +556,75 @@ class ProviderAdapterTests(unittest.TestCase):
         assert isinstance(action, AgentAction)
         self.assertIsNotNone(action.plan)
         self.assertEqual(action.metadata["tool_call_source"], "inline_tool_call_fallback")
+
+    def test_groq_inline_tool_call_fallback_parses_and_coerces_text_payload(self) -> None:
+        fake = _FakeSingleResponseOpenAIClient(
+            _OpenAIMessage(
+                (
+                    "<tool_call><function=file.list_files>"
+                    "<parameter=path>.</parameter>"
+                    "<parameter=recursive>True</parameter>"
+                    "</function></tool_call>"
+                )
+            )
+        )
+        provider = GroqToolCallingProvider(client=fake)
+        action = provider.next_action(
+            messages=[{"role": "user", "content": "list files"}],
+            tools=[
+                ToolSpec(
+                    name="file.list_files",
+                    description="list",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "recursive": {"type": "boolean"},
+                        },
+                    },
+                )
+            ],
+        )
+
+        self.assertIsNotNone(action.plan)
+        assert action.plan is not None
+        call = action.plan.batches[0].calls[0]
+        self.assertEqual(action.metadata["tool_call_source"], "inline_tool_call_fallback")
+        self.assertEqual(call.name, "file.list_files")
+        self.assertEqual(call.arguments, {"path": ".", "recursive": True})
+
+    def test_groq_inline_bash_alias_maps_to_shell_run_command(self) -> None:
+        fake = _FakeSingleResponseOpenAIClient(
+            _OpenAIMessage(
+                (
+                    "<tool_call><function=bash>"
+                    "<parameter=command>dir</parameter>"
+                    "<parameter=workdir>C:\\tmp</parameter>"
+                    "</function></tool_call>"
+                )
+            )
+        )
+        provider = GroqToolCallingProvider(client=fake)
+        action = provider.next_action(
+            messages=[{"role": "user", "content": "run dir"}],
+            tools=[
+                ToolSpec(
+                    name="shell.run_command",
+                    description="run",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                )
+            ],
+        )
+
+        self.assertIsNotNone(action.plan)
+        assert action.plan is not None
+        call = action.plan.batches[0].calls[0]
+        self.assertEqual(call.name, "shell.run_command")
+        self.assertEqual(call.arguments, {"command": "dir"})
 
 
 if __name__ == "__main__":
