@@ -15,6 +15,7 @@ from .common import (
     USAGE_METRICS_RICH,
     extract_usage_metrics,
     format_openai_like_message,
+    parse_inline_tool_calls,
 )
 
 
@@ -226,67 +227,110 @@ class GroqToolCallingProvider(ProviderAdapter):
         if reasoning:
             action_meta["reasoning"] = reasoning
 
+        content = message.content or ""
         if tool_calls:
-            mtp_calls: list[ToolCall] = []
-            serialized_tool_calls: list[dict[str, Any]] = []
-            parsed_calls: list[tuple[int, str, str, dict[str, Any]]] = []
-            id_by_index: dict[int, str] = {}
-            call_reasoning: str | None = None
-            if isinstance(reasoning, str) and reasoning.strip():
-                call_reasoning = reasoning.strip()
-            elif isinstance(message.content, str) and message.content.strip():
-                call_reasoning = message.content.strip()
+            return self._tool_action_from_calls(
+                tool_calls=list(tool_calls),
+                content=content,
+                reasoning=reasoning,
+                action_meta=action_meta,
+                tool_call_source="native_tool_calls",
+            )
 
-            for idx, tc in enumerate(tool_calls):
+        inline_tool_calls, cleaned_content = parse_inline_tool_calls(content, tools)
+        if inline_tool_calls:
+            return self._tool_action_from_calls(
+                tool_calls=inline_tool_calls,
+                content=cleaned_content,
+                reasoning=reasoning,
+                action_meta=action_meta,
+                tool_call_source="inline_tool_call_fallback",
+            )
+
+        return AgentAction(response_text=content, metadata=action_meta)
+
+    def _tool_action_from_calls(
+        self,
+        *,
+        tool_calls: list[Any],
+        content: str,
+        reasoning: str | None,
+        action_meta: dict[str, Any],
+        tool_call_source: str,
+    ) -> AgentAction:
+        mtp_calls: list[ToolCall] = []
+        serialized_tool_calls: list[dict[str, Any]] = []
+        parsed_calls: list[tuple[int, str, str, dict[str, Any], str]] = []
+        id_by_index: dict[int, str] = {}
+        call_reasoning: str | None = None
+        if isinstance(reasoning, str) and reasoning.strip():
+            call_reasoning = reasoning.strip()
+        elif isinstance(content, str) and content.strip():
+            call_reasoning = content.strip()
+
+        for idx, tc in enumerate(tool_calls):
+            if isinstance(tc, dict):
+                function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                fn_name = str(function.get("name") or tc.get("name") or "")
+                raw_args_value = function.get("arguments") or tc.get("arguments") or "{}"
+                parsed_args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else None
+                raw_args = raw_args_value if isinstance(raw_args_value, str) else json.dumps(raw_args_value, default=str)
+                call_id = str(tc.get("id") or f"call_{idx}")
+            else:
                 fn_name = tc.function.name
                 raw_args = tc.function.arguments or "{}"
+                parsed_args = None
                 call_id = tc.id or f"call_{idx}"
-                id_by_index[idx] = call_id
+            id_by_index[idx] = call_id
+            if parsed_args is None:
                 try:
                     parsed_args = json.loads(raw_args)
                 except json.JSONDecodeError:
                     parsed_args = {"_raw_arguments": raw_args}
-                parsed_calls.append((idx, call_id, fn_name, parsed_args))
-                serialized_tool_calls.append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": fn_name, "arguments": raw_args},
-                        "reasoning": call_reasoning,
-                    }
-                )
-
-            for idx, call_id, fn_name, parsed_args in parsed_calls:
-                normalized_args = self._normalize_refs(parsed_args, id_by_index, current_idx=idx)
-                depends_on = list(dict.fromkeys(self._extract_refs(normalized_args)))
-                mtp_calls.append(
-                    ToolCall(
-                        id=call_id,
-                        name=fn_name,
-                        arguments=normalized_args,
-                        depends_on=depends_on,
-                        reasoning=call_reasoning,
-                    )
-                )
-
-            plan = ExecutionPlan(
-                batches=self._calls_to_dependency_batches(mtp_calls),
-                metadata={"provider": "groq", "model": self.model},
+            parsed_calls.append((idx, call_id, fn_name, parsed_args, raw_args))
+            serialized_tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": fn_name, "arguments": raw_args},
+                    "reasoning": call_reasoning,
+                }
             )
-            return AgentAction(
-                plan=plan,
-                metadata={
-                    **action_meta,
-                    "assistant_tool_message": {
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": serialized_tool_calls,
-                        "reasoning": reasoning,
-                    },
+
+        for idx, call_id, fn_name, parsed_args, _raw_args in parsed_calls:
+            normalized_args = self._normalize_refs(parsed_args, id_by_index, current_idx=idx)
+            depends_on = list(dict.fromkeys(self._extract_refs(normalized_args)))
+            mtp_calls.append(
+                ToolCall(
+                    id=call_id,
+                    name=fn_name,
+                    arguments=normalized_args,
+                    depends_on=depends_on,
+                    reasoning=call_reasoning,
+                )
+            )
+
+        plan = ExecutionPlan(
+            batches=self._calls_to_dependency_batches(mtp_calls),
+            metadata={"provider": "groq", "model": self.model},
+        )
+        derived_batch_modes = [batch.mode for batch in plan.batches]
+        return AgentAction(
+            plan=plan,
+            metadata={
+                **action_meta,
+                "tool_call_source": tool_call_source,
+                "raw_tool_call_count": len(tool_calls),
+                "derived_batch_count": len(plan.batches),
+                "derived_batch_modes": derived_batch_modes,
+                "assistant_tool_message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": serialized_tool_calls,
+                    "reasoning": reasoning,
                 },
-            )
-
-        return AgentAction(response_text=message.content or "", metadata=action_meta)
+            },
+        )
 
     def finalize(self, messages: list[dict[str, Any]], tool_results: list[ToolResult]) -> str:
         groq_messages = self._to_groq_messages(messages)

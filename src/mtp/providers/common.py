@@ -10,7 +10,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from ..media import Audio, File, Image, Video
-from ..protocol import ToolBatch, ToolCall
+from ..protocol import ToolBatch, ToolCall, ToolSpec
 
 USAGE_METRICS_NONE = "none"
 USAGE_METRICS_BASIC = "basic"
@@ -266,6 +266,130 @@ def safe_load_arguments(raw_args: str | None) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     return {"_raw_arguments": raw}
+
+
+def _coerce_inline_scalar(value: str) -> Any:
+    stripped = value.strip()
+    lowered = stripped.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in {"none", "null"}:
+        return None
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return stripped
+
+
+def _schema_properties_for_tool(tool_name: str, tools: list[ToolSpec]) -> dict[str, Any]:
+    for tool in tools:
+        if tool.name != tool_name:
+            continue
+        schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+        properties = schema.get("properties")
+        return properties if isinstance(properties, dict) else {}
+    return {}
+
+
+def _coerce_inline_argument_for_schema(value: str, schema: dict[str, Any] | None) -> Any:
+    if not isinstance(schema, dict):
+        return _coerce_inline_scalar(value)
+    schema_type = schema.get("type")
+    stripped = value.strip()
+    if schema_type == "boolean":
+        lowered = stripped.lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    if schema_type == "integer":
+        try:
+            return int(stripped)
+        except ValueError:
+            return _coerce_inline_scalar(value)
+    if schema_type == "number":
+        try:
+            return float(stripped)
+        except ValueError:
+            return _coerce_inline_scalar(value)
+    if schema_type in {"object", "array"}:
+        try:
+            return json.loads(stripped)
+        except Exception:
+            return _coerce_inline_scalar(value)
+    return _coerce_inline_scalar(value)
+
+
+def clean_inline_tool_content(content: str) -> str:
+    cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
+
+
+def normalize_inline_tool_name(tool_name: str, tools: list[ToolSpec]) -> str:
+    candidate = tool_name.strip()
+    available = {tool.name for tool in tools}
+    if candidate in available:
+        return candidate
+    aliases = {
+        "bash": "shell.run_command",
+        "shell": "shell.run_command",
+        "run_command": "shell.run_command",
+        "read_file": "file.read_file",
+        "write_file": "file.write_file",
+        "list_files": "file.list_files",
+        "search_files": "file.search_in_files",
+        "search_in_files": "file.search_in_files",
+    }
+    alias = aliases.get(candidate.lower())
+    if alias in available:
+        return alias
+    suffix_matches = [name for name in available if name.endswith(f".{candidate}")]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+    return candidate
+
+
+def parse_inline_tool_calls(content: str, tools: list[ToolSpec]) -> tuple[list[dict[str, Any]], str]:
+    inline_calls: list[dict[str, Any]] = []
+    for idx, block_match in enumerate(
+        re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", content, flags=re.IGNORECASE | re.DOTALL),
+        start=1,
+    ):
+        block = block_match.group(1)
+        fn_match = re.search(
+            r"<function=([^>\s]+)>\s*(.*?)(?:</function>|$)",
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not fn_match:
+            continue
+        tool_name = normalize_inline_tool_name(fn_match.group(1), tools)
+        fn_body = fn_match.group(2)
+        properties = _schema_properties_for_tool(tool_name, tools)
+        arguments: dict[str, Any] = {}
+        for param_match in re.finditer(
+            r"<parameter=([^>\s]+)>\s*(.*?)(?:</parameter>|(?=<parameter=)|$)",
+            fn_body,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            param_name = param_match.group(1).strip()
+            if not param_name:
+                continue
+            if param_name not in properties and tool_name == "shell.run_command" and param_name in {"workdir", "cwd"}:
+                continue
+            param_value = param_match.group(2).strip()
+            arguments[param_name] = _coerce_inline_argument_for_schema(param_value, properties.get(param_name))
+        if tool_name:
+            inline_calls.append(
+                {
+                    "id": f"inline_call_{idx}",
+                    "name": tool_name,
+                    "arguments": arguments,
+                }
+            )
+    return inline_calls, clean_inline_tool_content(content)
 
 
 def calls_to_dependency_batches(calls: list[ToolCall]) -> list[ToolBatch]:

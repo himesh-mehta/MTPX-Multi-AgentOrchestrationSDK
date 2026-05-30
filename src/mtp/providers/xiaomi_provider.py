@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-import re
 from typing import Any
 
 from ..agent import AgentAction, ProviderAdapter
@@ -17,6 +16,7 @@ from .common import (
     extract_usage_metrics,
     format_openai_like_message,
     normalize_refs,
+    parse_inline_tool_calls,
     safe_load_arguments,
 )
 
@@ -193,48 +193,6 @@ class XiaomiToolCallingProvider(ProviderAdapter):
         return None
 
     @staticmethod
-    def _clean_inline_tool_content(content: str) -> str:
-        cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.IGNORECASE | re.DOTALL)
-        return cleaned.strip()
-
-    @classmethod
-    def _parse_inline_tool_calls(cls, content: str) -> tuple[list[dict[str, Any]], str]:
-        inline_calls: list[dict[str, Any]] = []
-        for idx, block_match in enumerate(
-            re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", content, flags=re.IGNORECASE | re.DOTALL),
-            start=1,
-        ):
-            block = block_match.group(1)
-            fn_match = re.search(
-                r"<function=([^>\s]+)>\s*(.*?)(?:</function>|$)",
-                block,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            if not fn_match:
-                continue
-            tool_name = fn_match.group(1).strip()
-            fn_body = fn_match.group(2)
-            arguments: dict[str, Any] = {}
-            for param_match in re.finditer(
-                r"<parameter=([^>\s]+)>\s*(.*?)(?:</parameter>|(?=<parameter=)|$)",
-                fn_body,
-                flags=re.IGNORECASE | re.DOTALL,
-            ):
-                param_name = param_match.group(1).strip()
-                param_value = param_match.group(2).strip()
-                if param_name:
-                    arguments[param_name] = param_value
-            if tool_name:
-                inline_calls.append(
-                    {
-                        "id": f"inline_call_{idx}",
-                        "name": tool_name,
-                        "arguments": arguments,
-                    }
-                )
-        return inline_calls, cls._clean_inline_tool_content(content)
-
-    @staticmethod
     def _assistant_message(
         *,
         content: str,
@@ -344,7 +302,7 @@ class XiaomiToolCallingProvider(ProviderAdapter):
                 tool_call_source="native_tool_calls",
             )
 
-        inline_tool_calls, cleaned_content = self._parse_inline_tool_calls(content)
+        inline_tool_calls, cleaned_content = parse_inline_tool_calls(content, tools)
         if inline_tool_calls:
             return self._tool_action_from_calls(
                 tool_calls=inline_tool_calls,
@@ -423,7 +381,7 @@ class XiaomiToolCallingProvider(ProviderAdapter):
             )
             return
 
-        inline_tool_calls, cleaned_content = self._parse_inline_tool_calls(content_acc)
+        inline_tool_calls, cleaned_content = parse_inline_tool_calls(content_acc, tools)
         if inline_tool_calls:
             yield self._tool_action_from_calls(
                 tool_calls=inline_tool_calls,
