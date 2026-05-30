@@ -55,4 +55,4 @@ Still needed to reach full ecosystem/library maturity:
 - docs site and benchmark suite
 
 Related:
-- [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
+- [Storage and Sessions](STORAGE.md)

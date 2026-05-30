@@ -4,7 +4,7 @@ This file is the model-facing reference for how an LLM should request tools in M
 
 ## First Rule
 
-Use the provider's native tool/function calling channel whenever the provider supports it. Do not write tool calls as normal assistant text unless the provider has failed to emit native tool calls and the adapter explicitly supports an inline fallback.
+Use the provider's native tool/function calling channel. MTP does not parse inline `<tool_call>` text from normal assistant output.
 
 A final answer must not contain raw `<tool_call>` blocks, JSON plans, or pseudo-code tool invocations. Tool calls are for the runtime; final answers are for the user.
 
@@ -117,32 +117,6 @@ When one tool needs the output of another tool, use `$ref` to refer to the prior
 ```
 
 Use parallel calls only when they are independent. Use sequential calls when later calls require earlier results.
-
-## Inline Fallback Syntax
-
-Inline fallback exists only to recover when a provider/model emits text instead of native tool calls. It is not the preferred syntax.
-
-Supported fallback format:
-
-```xml
-<tool_call>
-  <function=file.read_file>
-    <parameter=path>src/mtp/agent_os/app.py</parameter>
-    <parameter=start_line>1</parameter>
-    <parameter=end_line>120</parameter>
-  </function>
-</tool_call>
-```
-
-MTP currently normalizes common aliases:
-
-- `bash`, `shell`, `run_command` -> `shell.run_command`
-- `read_file` -> `file.read_file`
-- `write_file` -> `file.write_file`
-- `list_files` -> `file.list_files`
-- `search_files`, `search_in_files` -> `file.search_in_files`
-
-The inline fallback coerces scalar values using the target schema when available. For example, `True` becomes `true` for boolean parameters. Unknown shell working-directory parameters such as `workdir` and `cwd` are dropped because `shell.run_command` already runs inside the configured tool base directory.
 
 ## Built-In Tool Examples
 
