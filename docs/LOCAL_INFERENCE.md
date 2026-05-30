@@ -73,7 +73,7 @@ print(agent.run_loop("Calculate (25 * 4) + 10 and list files.", max_rounds=4))
 
 ### Example file
 
-- [examples/lmstudio_agent.py](C:\Users\prajw\Downloads\MTP\examples\lmstudio_agent.py)
+- [examples/lmstudio_agent.py](../examples/lmstudio_agent.py)
 
 ## Ollama
 
@@ -113,7 +113,7 @@ print(agent.run_loop("Calculate (25 * 4) + 10 and list files.", max_rounds=4))
 
 ### Example file
 
-- [examples/ollama_agent.py](C:\Users\prajw\Downloads\MTP\examples\ollama_agent.py)
+- [examples/ollama_agent.py](../examples/ollama_agent.py)
 
 ## Troubleshooting
 
@@ -201,6 +201,6 @@ Fix options:
 ## Related docs
 
 - [TUI CLI Local Inference Guide](TUI_LOCAL_INFERENCE.md) - Using local providers in the interactive TUI
-- [Providers](C:\Users\prajw\Downloads\MTP\docs\PROVIDERS.md)
-- [Quickstart](C:\Users\prajw\Downloads\MTP\docs\QUICKSTART.md)
-- [Agent API Reference](C:\Users\prajw\Downloads\MTP\docs\AGENT_API.md)
+- [Providers](PROVIDERS.md)
+- [Quickstart](QUICKSTART.md)
+- [Agent API Reference](AGENT_API.md)

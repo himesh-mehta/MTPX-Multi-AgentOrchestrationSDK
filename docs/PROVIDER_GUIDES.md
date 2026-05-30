@@ -36,7 +36,7 @@ The mock provider is not a general LLM. It only returns deterministic plans/text
 - Extra: `pip install "mtpx[groq]"`
 - Env var: `GROQ_API_KEY`
 - Default model: `llama-3.3-70b-versatile`
-- Tool calling: native Groq tool calls, with inline fallback parsing for malformed `<tool_call>` text
+- Tool calling: native Groq tool calls only
 - Streaming: finalize streaming with usage capture when supported
 
 Recommended when you want fast cloud inference with OpenAI-style tool schemas.
@@ -173,7 +173,7 @@ Use account-qualified model ids when required by Fireworks.
 - Env var: `MIMO_API_KEY`
 - Default model: `mimo-v2.5-pro`
 - Default base URL: `https://token-plan-ams.xiaomimimo.com/v1`
-- Tool calling: native OpenAI-compatible calls, with inline fallback parsing for malformed `<tool_call>` text
+- Tool calling: native OpenAI-compatible calls only
 - Reasoning: supports Xiaomi reasoning/thinking metadata where the model returns it
 
 The adapter automatically manages thinking mode for planning/finalization and disables tool calls after a tool round where required by the endpoint.
@@ -210,7 +210,7 @@ Start the LM Studio local server and load a tool-capable model before launching 
 ## Troubleshooting
 
 - Repeated answers in Agent OS: ensure Persistent Autoresearch Mode is off for ordinary chat.
-- Raw `<tool_call>` in the answer: use a tool-capable model/provider. Groq and Xiaomi have a fallback parser, but native tool calls are preferred.
+- Raw `<tool_call>` in the answer: use a tool-capable model/provider and configure native tool calls. MTP does not parse tool calls from assistant text.
 - Tool validation failure: compare the model arguments against [TOOL_CALL_SYNTAX.md](TOOL_CALL_SYNTAX.md).
 - Missing SDK: install the matching extra, for example `pip install "mtpx[groq]"`.
 - Missing API key: set the documented env var or enter the key in Agent OS.
