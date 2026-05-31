@@ -102,7 +102,7 @@ class Agent:
         tools: ToolRegistry | None = None,
         debug_mode: bool = False,
         debug_logger: Callable[[str], None] | None = None,
-        debug_max_chars: int = 600,
+        debug_max_chars: int | None = None,
         strict_dependency_mode: bool = False,
         instructions: str | None = None,
         system_instructions: str | None = None,
@@ -443,6 +443,8 @@ class Agent:
                 text = json.dumps(value, default=str)
         except Exception:
             text = repr(value)
+        if self.debug_max_chars is None or self.debug_max_chars <= 0:
+            return text
         if len(text) <= self.debug_max_chars:
             return text
         return text[: self.debug_max_chars] + "...<truncated>"
