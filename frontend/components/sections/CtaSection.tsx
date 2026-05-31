@@ -7,11 +7,12 @@ const fadeUp = { hidden: { opacity: 0, y: 20 }, visible: (i = 0) => ({ opacity: 
 
 const VS = [
   { old: "Probabilistic text generation", next: "Deterministic task execution" },
-  { old: "Unstructured sequential tool calls", next: "DAG-based dependency resolution" },
-  { old: "Ephemeral in-memory state", next: "Persistent JSON/Postgres/MySQL sessions" },
-  { old: "Black-box LLM trust", next: "Policy-driven allow/ask/deny controls" },
-  { old: "Single provider lock-in", next: "Swap 13+ providers with one line" },
+  { old: "Unstructured sequential tool calls", next: "DAG-based batch dependency resolution" },
+  { old: "Ephemeral in-memory state", next: "Persistent JSON / Postgres / MySQL sessions" },
+  { old: "Black-box LLM trust", next: "Policy-driven allow / ask / deny controls" },
+  { old: "Single provider lock-in", next: "Swap 16 providers with one line" },
   { old: "No execution visibility", next: "Real-time structured event streaming" },
+  { old: "Single-agent only", next: "Multi-agent teams with delegation" },
 ];
 
 const QUICKSTART = `from mtp import Agent
@@ -36,9 +37,14 @@ agent = Agent.MTPAgent(
     strict_dependency_mode=True,
 )
 
+# Basic run
+response = agent.run("Calculate 25*4+10, then list files.")
+print(response)
+
+# Stream with structured events
 agent.print_response(
-    "Calculate 25*4+10, then list files.",
-    max_rounds=4,
+    "Analyze the codebase and summarize.",
+    max_rounds=6,
     stream=True,
     stream_events=True,
 )`;
