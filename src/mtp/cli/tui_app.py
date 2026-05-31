@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 import time
 from typing import Any
+from uuid import uuid4
 
 from textual.app import App, ComposeResult
 from textual.widgets import OptionList, RichLog
@@ -92,13 +93,17 @@ class MTPApp(App):
         self._llm_worker_running = False
         self._memory_refresh_running = False
         self._live_status: str = ""
-        self._live_reasoning: str = ""
-        self._live_text: str = ""
+        self._live_blocks: list[dict[str, Any]] = []
+        self._live_thinking_text: str = ""
         self._live_tool_events: list[str] = []
         self._live_tool_details: list[dict[str, Any]] = []
         self._live_warnings: list[str] = []
         self._last_live_render_at: float = 0.0
         self._show_tool_details = False
+        self._memory_refresh_queued = False
+        self._memory_refresh_dirty = False
+        self._memory_launch_scan_done = False
+        self._current_run_id: str | None = None
 
     @property
     def state(self) -> TUIState:
@@ -126,7 +131,7 @@ class MTPApp(App):
         self._rebuild_chat_log()
         self._show_boot_info()
         self.set_timer(0.5, self._focus_input)
-        self.set_interval(20.0, self._schedule_background_memory_refresh)
+        self._request_background_memory_refresh(reason="startup", prefer_full_scan=True)
 
     def _focus_input(self) -> None:
         try:
@@ -153,17 +158,9 @@ class MTPApp(App):
 
     # ── UI refresh helpers ───────────────────────────────────────────────
 
-    @staticmethod
-    def _extract_thinking_text(usage_lines: list[str]) -> str:
-        for line in usage_lines:
-            if line.startswith("thinking="):
-                return line.replace("thinking=", "", 1).strip()
-        return ""
-
     def _live_message_active(self) -> bool:
         return bool(
-            self._live_reasoning.strip()
-            or self._live_text.strip()
+            self._live_blocks
             or self._live_tool_events
             or self._live_tool_details
             or self._live_warnings
@@ -190,9 +187,11 @@ class MTPApp(App):
                     backend=turn.backend,
                     warnings=turn.warnings,
                     usage_lines=turn.usage_lines,
-                    thinking=self._extract_thinking_text(turn.usage_lines),
+                    thinking=turn.thinking_text,
                     tool_details=list(turn.tool_details),
                     show_tool_details=self._show_tool_details,
+                    assistant_blocks=list(turn.assistant_blocks),
+                    collapse_thinking=True,
                 )
             )
 
@@ -203,14 +202,17 @@ class MTPApp(App):
                 chat_log.add_assistant_message(
                     ChatMessage(
                         role="assistant",
-                        text=self._live_text,
+                        text="",
                         model=active_model_name(self._state),
                         backend=self._state.backend,
                         tool_events=list(self._live_tool_events),
                         tool_details=list(self._live_tool_details),
                         warnings=list(self._live_warnings),
-                        thinking=self._live_reasoning.strip(),
+                        thinking=self._live_thinking_text.strip(),
                         show_tool_details=self._show_tool_details,
+                        assistant_blocks=list(self._live_blocks),
+                        collapse_thinking=False,
+                        is_live=True,
                     )
                 )
 
@@ -226,6 +228,7 @@ class MTPApp(App):
                 sandbox_mode=self._state.codex_sandbox_mode,
                 thinking_label=thinking.label if thinking else None,
                 thinking_value=thinking.current_label if thinking else None,
+                is_running=self._llm_worker_running,
             )
         except Exception:
             pass
@@ -337,6 +340,11 @@ class MTPApp(App):
                 self.query_one("#attachment-container").remove_class("visible")
 
     def action_hide_suggestions(self) -> None:
+        if self._llm_worker_running and self._current_run_id and self._state.backend != "codex" and self._state.agent is not None:
+            cancelled = self._state.agent.cancel_run(self._current_run_id)
+            if cancelled:
+                self.query_one("#chat-log", ChatLog).add_system_message("  Interrupt requested...", style="#fbbf24")
+            return
         try:
             option_list = self.query_one("#suggestion-list", OptionList)
             if option_list.has_class("visible"):
@@ -589,6 +597,31 @@ class MTPApp(App):
             
         self._populate_and_show_suggestions(matches, prefix=_ARG_SUGGESTION_PREFIX)
 
+    @staticmethod
+    def _command_supports_arguments(cmd: str) -> bool:
+        return cmd in {
+            "backend", "model", "load", "sessions", "open", "mode",
+            "reasoning", "details", "sandbox", "codebase",
+        }
+
+    def _show_next_command_suggestions(self, input_area: InputArea) -> None:
+        cursor_row, cursor_col = input_area.cursor_location
+        lines = input_area.text.split("\n")
+        current_line = lines[cursor_row][:cursor_col]
+        if not current_line.startswith("/"):
+            return
+        parts = current_line.split()
+        if not parts:
+            self._show_command_suggestions("/")
+            return
+        cmd = parts[0][1:].lower()
+        if len(parts) == 1 and current_line.endswith(" ") and self._command_supports_arguments(cmd):
+            self._show_command_argument_suggestions(cmd, "")
+            return
+        if cmd == "codebase":
+            if len(parts) == 2 and parts[1].lower() == "memory" and current_line.endswith(" "):
+                self._show_command_argument_suggestions(cmd, "memory ")
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_list = event.option_list
         option_list.remove_class("visible")
@@ -616,6 +649,7 @@ class MTPApp(App):
             lines[cursor_row] = new_line + lines[cursor_row][cursor_col:]
             input_area.text = "\n".join(lines)
             input_area.cursor_location = (cursor_row, start_idx + len(val) + 1)
+            self._show_next_command_suggestions(input_area)
             return
 
         if not words:
@@ -645,6 +679,7 @@ class MTPApp(App):
             lines[cursor_row] = new_line + lines[cursor_row][cursor_col:]
             input_area.text = "\n".join(lines)
             input_area.cursor_location = (cursor_row, start_idx + len(selected) + 1)
+            self._show_next_command_suggestions(input_area)
 
     def _send_prompt(self, raw: str) -> None:
         try:
@@ -676,6 +711,8 @@ class MTPApp(App):
         # Store raw prompt for turn recording
         self._pending_raw_prompt = raw
         self._llm_worker_running = True
+        self._memory_refresh_dirty = False
+        self._current_run_id = f"run-{uuid4().hex[:12]}"
 
         self.run_worker(
             self._run_llm_worker(expanded, attachments, att_warnings),
@@ -692,7 +729,11 @@ class MTPApp(App):
             self.call_from_thread(self._handle_live_event, kind, message)
 
         result = await asyncio.to_thread(
-            run_prompt_blocking, self._state, expanded_prompt, emit_callback=emit_live
+            run_prompt_blocking,
+            self._state,
+            expanded_prompt,
+            emit_callback=emit_live,
+            run_id=self._current_run_id,
         )
         result.attachments = attachments
         result.warnings = [*att_warnings, *result.warnings]
@@ -744,17 +785,36 @@ class MTPApp(App):
         cmd_log.add_class("visible")
         cmd_log.write(Text(f"  {message}", style=style))
 
-    def _schedule_background_memory_refresh(self) -> None:
-        if self._llm_worker_running or self._memory_refresh_running or self._codebase_scan_progress is not None:
-            return
+    def _request_background_memory_refresh(self, *, reason: str, prefer_full_scan: bool = False) -> None:
         try:
             from mtp.codebase import CodebaseMemory
 
             memory = CodebaseMemory(self._state.cwd)
-            if not memory.is_enabled():
+            status = memory.status()
+            if not status.enabled:
+                self._memory_refresh_queued = False
                 return
         except Exception:
             return
+
+        if self._llm_worker_running or self._memory_refresh_running or self._codebase_scan_progress is not None:
+            self._memory_refresh_queued = True
+            return
+
+        should_full_scan = prefer_full_scan or not status.last_scan_at or status.file_count == 0 or status.chunk_count == 0
+        if should_full_scan:
+            self._memory_launch_scan_done = True
+            spinner = self.query_one("#spinner", SpinnerWidget)
+            spinner.start("Indexing codebase 0%")
+            self._codebase_scan_root = self._state.cwd
+            self._codebase_scan_progress = "Indexing codebase 0%"
+            self.run_worker(
+                self._run_codebase_scan_worker(self._state.cwd),
+                name="codebase_scan",
+                exclusive=True,
+            )
+            return
+
         self._memory_refresh_running = True
         self.run_worker(
             self._run_codebase_refresh_worker(self._state.cwd),
@@ -789,10 +849,80 @@ class MTPApp(App):
                 lines.append(f"  {item['created_at']} {item['title']}{model}")
         return "\n".join(lines)
 
+    def _append_live_thinking_block(self, text: str) -> None:
+        if not text:
+            return
+        self._live_thinking_text += text
+        if self._live_blocks and self._live_blocks[-1].get("type") == "thinking":
+            self._live_blocks[-1]["text"] = str(self._live_blocks[-1].get("text") or "") + text
+            return
+        self._live_blocks.append({"type": "thinking", "text": text})
+
+    def _append_live_text_block(self, text: str) -> None:
+        if not text:
+            return
+        if self._live_blocks and self._live_blocks[-1].get("type") == "text":
+            self._live_blocks[-1]["text"] = str(self._live_blocks[-1].get("text") or "") + text
+            return
+        self._live_blocks.append({"type": "text", "text": text})
+
+    def _ensure_live_tool_group(self, *, batch_index: Any = None, mode: str | None = None) -> dict[str, Any]:
+        if self._live_blocks and self._live_blocks[-1].get("type") == "tool_group":
+            block = self._live_blocks[-1]
+            if batch_index is None or block.get("batch_index") == batch_index:
+                if mode and not block.get("mode"):
+                    block["mode"] = mode
+                return block
+        block = {"type": "tool_group", "batch_index": batch_index, "mode": mode or "unknown", "items": []}
+        self._live_blocks.append(block)
+        return block
+
+    def _upsert_live_tool_item(self, detail: dict[str, Any]) -> None:
+        dtype = str(detail.get("type") or "")
+        if dtype == "batch_started":
+            self._ensure_live_tool_group(batch_index=detail.get("batch_index"), mode=str(detail.get("mode") or "unknown"))
+            return
+
+        if dtype not in {"tool_started", "tool_finished"}:
+            return
+        call_id = str(detail.get("call_id") or detail.get("tool_name") or "tool")
+        for block in self._live_blocks:
+            if block.get("type") != "tool_group":
+                continue
+            for item in block.get("items") or []:
+                if str(item.get("call_id") or "") == call_id:
+                    item["status"] = "running" if dtype == "tool_started" else ("completed" if detail.get("success") else "failed")
+                    item["reasoning"] = detail.get("reasoning")
+                    item["cached"] = detail.get("cached")
+                    item["error"] = detail.get("error")
+                    if detail.get("started_at_ms") is not None:
+                        item["started_at_ms"] = detail.get("started_at_ms")
+                    if detail.get("finished_at_ms") is not None:
+                        item["finished_at_ms"] = detail.get("finished_at_ms")
+                    return
+
+        block = self._ensure_live_tool_group(batch_index=detail.get("batch_index"))
+        block["items"].append(
+            {
+                "call_id": call_id,
+                "tool_name": str(detail.get("tool_name") or "tool"),
+                "status": "running" if dtype == "tool_started" else ("completed" if detail.get("success") else "failed"),
+                "reasoning": detail.get("reasoning"),
+                "cached": detail.get("cached"),
+                "error": detail.get("error"),
+                "started_at_ms": detail.get("started_at_ms"),
+                "finished_at_ms": detail.get("finished_at_ms"),
+            }
+        )
+
+    @staticmethod
+    def _tool_mutates_workspace(tool_name: str) -> bool:
+        return tool_name.startswith(("edit.", "shell.", "test."))
+
     def _reset_live_preview(self) -> None:
         self._live_status = ""
-        self._live_reasoning = ""
-        self._live_text = ""
+        self._live_blocks = []
+        self._live_thinking_text = ""
         self._live_tool_events = []
         self._live_tool_details = []
         self._live_warnings = []
@@ -824,14 +954,21 @@ class MTPApp(App):
                 detail = {"type": "detail", "message": str(message)}
             self._live_tool_details.append(detail)
             self._state.last_tool_details = list(self._live_tool_details)
+            self._upsert_live_tool_item(detail)
+            if (
+                str(detail.get("type") or "") == "tool_finished"
+                and detail.get("success")
+                and self._tool_mutates_workspace(str(detail.get("tool_name") or ""))
+            ):
+                self._memory_refresh_dirty = True
         elif kind == "warn":
             self._live_warnings.append(message)
         elif kind == "reasoning":
-            self._live_reasoning += message
+            self._append_live_thinking_block(str(message))
             if not self._live_status:
                 spinner.update_label("Reasoning")
         elif kind == "text":
-            self._live_text += message
+            self._append_live_text_block(str(message))
             if not self._live_status:
                 spinner.update_label("Streaming response")
         else:
@@ -857,7 +994,6 @@ class MTPApp(App):
                     f"  saved={result.db_path}"
                 )
                 self._codebase_scan_progress = None
-                self._schedule_background_memory_refresh()
             elif event.state == WorkerState.ERROR:
                 spinner.stop()
                 self._append_cmd_log(f"Codebase scan failed: {event.worker.error}", style="bold #f43f5e")
@@ -866,6 +1002,9 @@ class MTPApp(App):
                 spinner.stop()
                 self._append_cmd_log("Codebase scan cancelled.", style="#fbbf24")
                 self._codebase_scan_progress = None
+            if self._memory_refresh_queued:
+                self._memory_refresh_queued = False
+                self._request_background_memory_refresh(reason="queued-post-scan")
             return
 
         if event.worker.name == "codebase_refresh":
@@ -884,6 +1023,9 @@ class MTPApp(App):
                     style="bold #f43f5e",
                 )
             self._memory_refresh_running = False
+            if self._memory_refresh_queued:
+                self._memory_refresh_queued = False
+                self._request_background_memory_refresh(reason="queued-post-refresh")
             return
 
         if event.worker.name != "llm_call":
@@ -891,14 +1033,19 @@ class MTPApp(App):
 
         if event.state in {WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED}:
             self._llm_worker_running = False
+            self._current_run_id = None
 
         if event.state == WorkerState.SUCCESS:
             spinner.stop()
             result: ChatResult = event.worker.result
+            if self._live_blocks and not result.assistant_blocks:
+                result.assistant_blocks = list(self._live_blocks)
+            if self._live_thinking_text and not result.thinking_text:
+                result.thinking_text = self._live_thinking_text.strip()
 
             # Record the turn with the original raw prompt
             record_turn(self._state, self._pending_raw_prompt, result)
-            self._schedule_background_memory_refresh()
+            self._request_background_memory_refresh(reason="post-run")
 
             # Auto-generate title from first prompt
             if len(self._state.transcript) == 1 and not self._state.session_label:
@@ -924,6 +1071,7 @@ class MTPApp(App):
             self.query_one("#chat-log", ChatLog).add_system_message(
                 f"Error: {event.worker.error}", style="bold #f43f5e"
             )
+            self._request_background_memory_refresh(reason="post-run-error")
 
         elif event.state == WorkerState.CANCELLED:
             spinner.stop()
@@ -933,6 +1081,9 @@ class MTPApp(App):
             self.query_one("#chat-log", ChatLog).add_system_message(
                 "Request cancelled.", style="#fbbf24"
             )
+            self._request_background_memory_refresh(reason="post-run-cancelled")
+
+        self._refresh_status_bar()
 
     def action_cmd_dispatch(self, cmd: str, arg: str) -> None:
         """Central action handler called by CommandPalette entries."""

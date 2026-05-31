@@ -48,6 +48,8 @@ class ChatResult:
     warnings: list[str]
     usage_lines: list[str]
     tool_details: list[dict[str, Any]] = field(default_factory=list)
+    assistant_blocks: list[dict[str, Any]] = field(default_factory=list)
+    thinking_text: str = ""
 
 
 @dataclass
@@ -61,6 +63,8 @@ class TranscriptTurn:
     usage_lines: list[str]
     created_at: str
     tool_details: list[dict[str, Any]] = field(default_factory=list)
+    assistant_blocks: list[dict[str, Any]] = field(default_factory=list)
+    thinking_text: str = ""
 
 
 @dataclass
@@ -132,6 +136,8 @@ def serialize_transcript(turns: list[TranscriptTurn]) -> list[dict[str, Any]]:
             "warnings": list(t.warnings), "usage_lines": list(t.usage_lines),
             "created_at": t.created_at,
             "tool_details": list(t.tool_details),
+            "assistant_blocks": list(t.assistant_blocks),
+            "thinking_text": t.thinking_text,
         }
         for t in turns
     ]
@@ -157,6 +163,11 @@ def deserialize_transcript(payload: Any) -> list[TranscriptTurn]:
                 detail for detail in item.get("tool_details") or []
                 if isinstance(detail, dict)
             ],
+            assistant_blocks=[
+                block for block in item.get("assistant_blocks") or []
+                if isinstance(block, dict)
+            ],
+            thinking_text=str(item.get("thinking_text") or ""),
         ))
     return transcript
 

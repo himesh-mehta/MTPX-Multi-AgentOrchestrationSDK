@@ -26,6 +26,8 @@ class MTPRunResult:
     warnings: list[str]
     usage_lines: list[str]
     tool_details: list[dict[str, Any]]
+    assistant_blocks: list[dict[str, Any]]
+    thinking_text: str
 
 
 def _merge_stream_text(existing: str, incoming: str) -> str:
@@ -51,6 +53,89 @@ def _append_unique_text(chunks: list[str], chunk: str) -> None:
         return
     merged = _merge_stream_text("".join(chunks), chunk)
     chunks[:] = [merged]
+
+
+def _append_text_block(blocks: list[dict[str, Any]], text: str) -> None:
+    if not text:
+        return
+    if blocks and blocks[-1].get("type") == "text":
+        blocks[-1]["text"] = _merge_stream_text(str(blocks[-1].get("text") or ""), text)
+        return
+    blocks.append({"type": "text", "text": text})
+
+
+def _append_thinking_block(blocks: list[dict[str, Any]], text: str) -> None:
+    if not text:
+        return
+    if blocks and blocks[-1].get("type") == "thinking":
+        blocks[-1]["text"] = _merge_stream_text(str(blocks[-1].get("text") or ""), text)
+        return
+    blocks.append({"type": "thinking", "text": text})
+
+
+def _ensure_tool_group(
+    blocks: list[dict[str, Any]],
+    *,
+    batch_index: Any = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    if blocks and blocks[-1].get("type") == "tool_group":
+        last = blocks[-1]
+        if batch_index is None or last.get("batch_index") == batch_index:
+            if mode and not last.get("mode"):
+                last["mode"] = mode
+            return last
+    group = {"type": "tool_group", "batch_index": batch_index, "mode": mode or "unknown", "items": []}
+    blocks.append(group)
+    return group
+
+
+def _upsert_tool_item(
+    blocks: list[dict[str, Any]],
+    *,
+    call_id: Any,
+    tool_name: str,
+    status: str,
+    reasoning: str | None = None,
+    batch_index: Any = None,
+    mode: str | None = None,
+    cached: Any = None,
+    error: str | None = None,
+    started_at_ms: int | None = None,
+    finished_at_ms: int | None = None,
+) -> None:
+    call_id_str = str(call_id or tool_name)
+    for block in blocks:
+        if block.get("type") != "tool_group":
+            continue
+        for item in block.get("items") or []:
+            if str(item.get("call_id") or "") == call_id_str:
+                item["status"] = status
+                if reasoning:
+                    item["reasoning"] = reasoning
+                if cached is not None:
+                    item["cached"] = cached
+                if error:
+                    item["error"] = error
+                if started_at_ms is not None:
+                    item["started_at_ms"] = started_at_ms
+                if finished_at_ms is not None:
+                    item["finished_at_ms"] = finished_at_ms
+                return
+
+    group = _ensure_tool_group(blocks, batch_index=batch_index, mode=mode)
+    group["items"].append(
+        {
+            "call_id": call_id_str,
+            "tool_name": tool_name,
+            "status": status,
+            "reasoning": reasoning,
+            "cached": cached,
+            "error": error,
+            "started_at_ms": started_at_ms,
+            "finished_at_ms": finished_at_ms,
+        }
+    )
 
 
 def _extract_tool_events_from_agent(agent: Agent.MTPAgent) -> list[str]:
@@ -86,6 +171,7 @@ def run_mtp_prompt(
     emit_live: Callable[[str, Any], None] | None = None,
     provider_name: str | None = None,
     model_name: str | None = None,
+    run_id: str | None = None,
 ) -> MTPRunResult:
     """
     Execute a prompt using an MTP provider agent with event streaming.
@@ -107,6 +193,13 @@ def run_mtp_prompt(
     final_text_chunks: list[str] = []
     thinking_text = ""
     saw_tool_round = False
+    assistant_blocks: list[dict[str, Any]] = []
+    planning_duration = 0.0
+    tool_execution_duration = 0.0
+    finalize_duration = 0.0
+    memory_waited = False
+    tool_phase_started_at: int | None = None
+    tool_phase_finished_at: int | None = None
 
     # Metrics tracking
     total_input_tokens = 0
@@ -136,6 +229,7 @@ def run_mtp_prompt(
             stream_final=True,
             stream_tool_events=True,
             stream_tool_results=False,
+            run_id=run_id,
         ):
             event_type = event.get("type")
 
@@ -163,6 +257,10 @@ def run_mtp_prompt(
                 duration = event.get("duration_seconds", 0.0)
                 if duration:
                     total_duration += duration
+                    if event.get("stage") == "finalize":
+                        finalize_duration += duration
+                    else:
+                        planning_duration += duration
 
             elif event_type == "plan_received":
                 saw_tool_round = True
@@ -176,19 +274,30 @@ def run_mtp_prompt(
                     "batches": list(event.get("batches") or []),
                 }
                 tool_details.append(detail)
+                if detail["derived_batch_count"] is not None:
+                    detail["observed_at_ms"] = int(perf_counter() * 1000)
                 if emit_live:
                     emit_live("tool_detail", detail)
 
             elif event_type == "batch_started":
                 saw_tool_round = True
                 final_text_chunks = []
+                observed_at_ms = int(perf_counter() * 1000)
                 detail = {
                     "type": "batch_started",
                     "batch_index": event.get("batch_index"),
                     "mode": event.get("mode"),
                     "call_ids": list(event.get("call_ids") or []),
+                    "observed_at_ms": observed_at_ms,
                 }
                 tool_details.append(detail)
+                _ensure_tool_group(
+                    assistant_blocks,
+                    batch_index=event.get("batch_index"),
+                    mode=str(event.get("mode") or "unknown"),
+                )
+                if tool_phase_started_at is None:
+                    tool_phase_started_at = observed_at_ms
                 if emit_live:
                     emit_live("tool_detail", detail)
 
@@ -197,6 +306,7 @@ def run_mtp_prompt(
                 final_text_chunks = []
                 tool_name = event.get("tool_name", "unknown")
                 reasoning = event.get("reasoning", "")
+                observed_at_ms = int(perf_counter() * 1000)
                 if reasoning:
                     tool_event_msg = f"🔧 {tool_name}: {reasoning}"
                 else:
@@ -210,8 +320,18 @@ def run_mtp_prompt(
                     "depends_on": list(event.get("depends_on") or []),
                     "arguments": event.get("arguments"),
                     "reasoning": reasoning or None,
+                    "started_at_ms": observed_at_ms,
                 }
                 tool_details.append(detail)
+                _upsert_tool_item(
+                    assistant_blocks,
+                    call_id=event.get("call_id"),
+                    tool_name=tool_name,
+                    status="running",
+                    reasoning=reasoning or None,
+                    batch_index=event.get("batch_index"),
+                    started_at_ms=observed_at_ms,
+                )
                 if emit_live:
                     emit_live("tool", tool_event_msg)
                     emit_live("tool_detail", detail)
@@ -219,6 +339,7 @@ def run_mtp_prompt(
             elif event_type == "tool_finished":
                 tool_name = event.get("tool_name", "unknown")
                 success = event.get("success", False)
+                observed_at_ms = int(perf_counter() * 1000)
                 detail = {
                     "type": "tool_finished",
                     "tool_name": tool_name,
@@ -228,8 +349,21 @@ def run_mtp_prompt(
                     "approval": event.get("approval"),
                     "media_counts": event.get("media_counts"),
                     "reasoning": event.get("reasoning"),
+                    "finished_at_ms": observed_at_ms,
+                    "error": event.get("error"),
                 }
                 tool_details.append(detail)
+                tool_phase_finished_at = observed_at_ms
+                _upsert_tool_item(
+                    assistant_blocks,
+                    call_id=event.get("call_id"),
+                    tool_name=tool_name,
+                    status="completed" if success else "failed",
+                    reasoning=event.get("reasoning"),
+                    cached=event.get("cached"),
+                    error=event.get("error"),
+                    finished_at_ms=observed_at_ms,
+                )
                 if success:
                     msg = f"  {SYM_OK} {tool_name} completed"
                     tool_events.append(msg)
@@ -246,6 +380,7 @@ def run_mtp_prompt(
             elif event_type == "reasoning_chunk":
                 chunk = event.get("chunk", "")
                 thinking_text = _merge_stream_text(thinking_text, chunk)
+                _append_thinking_block(assistant_blocks, chunk)
                 if emit_live:
                     emit_live("reasoning", chunk)
 
@@ -259,6 +394,7 @@ def run_mtp_prompt(
                 source = str(event.get("source") or "")
                 if source in {"finalize_stream", "finalize_fallback"} or not saw_tool_round:
                     _append_unique_text(final_text_chunks, chunk)
+                _append_text_block(assistant_blocks, chunk)
                 if emit_live:
                     emit_live("text", chunk)
 
@@ -267,11 +403,19 @@ def run_mtp_prompt(
                 if final_text:
                     if saw_tool_round or not final_text_chunks or not "".join(final_text_chunks).strip():
                         final_text_chunks = [final_text]
+                    if not any(block.get("type") == "text" for block in assistant_blocks):
+                        assistant_blocks = [block for block in assistant_blocks if block.get("type") != "text"]
+                        _append_text_block(assistant_blocks, final_text)
+
+            elif event_type == "round_started":
+                memory_waited = False
 
         if emit_live:
             emit_live("status", "Processing response...")
 
         result_text = "".join(final_text_chunks) if final_text_chunks else ""
+        if tool_phase_started_at is not None and tool_phase_finished_at is not None:
+            tool_execution_duration = max(0.0, (tool_phase_finished_at - tool_phase_started_at) / 1000)
 
         usage_lines: list[str] = []
         if llm_calls > 0:
@@ -297,9 +441,6 @@ def run_mtp_prompt(
                 f"tokens(in/out/total/reasoning)={total_input_tokens}/{total_output_tokens}/{total_tokens}/{reasoning_tokens}"
             )
 
-            if thinking_text.strip():
-                usage_lines.append(f"thinking={thinking_text.strip()}")
-
             if any([cached_input_tokens, cache_write_tokens, cache_creation_input_tokens, cache_read_input_tokens]):
                 usage_lines.append(
                     f"cache(input/write/create/read)={cached_input_tokens}/{cache_write_tokens}/{cache_creation_input_tokens}/{cache_read_input_tokens}"
@@ -307,6 +448,10 @@ def run_mtp_prompt(
 
             usage_lines.append(f"llm_calls={llm_calls}")
             usage_lines.append(f"duration={total_duration:.2f}s")
+            usage_lines.append(
+                f"phases(plan/tools/finalize)={planning_duration:.2f}s/{tool_execution_duration:.2f}s/{finalize_duration:.2f}s"
+            )
+            usage_lines.append(f"memory_refresh_waited={'yes' if memory_waited else 'no'}")
             if tokens_per_sec > 0:
                 usage_lines.append(f"speed={tokens_per_sec:.1f} tokens/s")
 
@@ -323,6 +468,8 @@ def run_mtp_prompt(
             warnings=warnings,
             usage_lines=usage_lines,
             tool_details=tool_details,
+            assistant_blocks=assistant_blocks,
+            thinking_text=thinking_text.strip(),
         )
 
     except Exception as exc:
@@ -335,6 +482,8 @@ def run_mtp_prompt(
             warnings=warnings,
             usage_lines=["tokens(in/out/total/reasoning)=error/error/error/error"],
             tool_details=[],
+            assistant_blocks=[],
+            thinking_text="",
         )
 
 
