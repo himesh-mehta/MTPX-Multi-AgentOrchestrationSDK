@@ -53,8 +53,8 @@ class InputArea(TextArea):
     DEFAULT_CSS = """
     InputArea {
         height: auto;
-        min-height: 3;
-        max-height: 10;
+        min-height: 5;
+        max-height: 14;
         border: tall $accent 40%;
         background: $surface;
         padding: 0 1;
@@ -196,3 +196,4 @@ class InputPanel(Vertical):
         yield Horizontal(id="attachment-container")
         yield PromptLabel(id="prompt-label")
         yield InputArea(id="chat-input")
+        yield Static("  Ctrl+B sidebar   Ctrl+P commands   Ctrl+Y copy   Esc interrupt/hide", id="input-hints")

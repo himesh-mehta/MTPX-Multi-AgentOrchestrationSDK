@@ -18,8 +18,6 @@ _TOOL_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 
 
 class ChatMessage:
-    """A single chat message for display."""
-
     __slots__ = (
         "role",
         "text",
@@ -75,10 +73,8 @@ class ChatMessage:
 
 
 class ClickableHeader(Static):
-    """A small clickable header row."""
-
     class Activated(Message):
-        """Raised when the header is clicked."""
+        """Raised when clicked."""
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
@@ -95,7 +91,7 @@ class ThinkingBlockWidget(Vertical):
         display: none;
     }
     .thinking-header {
-        color: #38bdf8;
+        color: #fbbf24;
     }
     .thinking-header:hover {
         background: #18181b;
@@ -112,55 +108,100 @@ class ThinkingBlockWidget(Vertical):
         self._collapsed = collapsed
 
     def compose(self) -> ComposeResult:
-        yield ClickableHeader(self._header_text(), classes="thinking-header")
-        yield Static(self._text or "_No thinking captured._", classes="thinking-body")
+        yield ClickableHeader(classes="thinking-header")
+        yield Static(classes="thinking-body")
+
+    def on_mount(self) -> None:
+        self.update_block(self._text, collapsed=self._collapsed)
 
     def on_clickable_header_activated(self, event: ClickableHeader.Activated) -> None:
         self._collapsed = not self._collapsed
-        self._apply_state()
+        self._apply()
 
-    def on_mount(self) -> None:
-        self._apply_state()
+    def update_block(self, text: str, *, collapsed: bool | None = None) -> None:
+        self._text = text
+        if collapsed is not None:
+            self._collapsed = collapsed
+        self.query_one(".thinking-body", Static).update(self._text or "_No thinking captured._")
+        self._apply()
 
-    def _apply_state(self) -> None:
-        header = self.query_one(".thinking-header", ClickableHeader)
-        header.update(self._header_text())
+    def _apply(self) -> None:
+        header = Text()
+        header.append("  ")
+        header.append("+" if self._collapsed else "-", style="#fbbf24")
+        header.append(" Thinking", style="bold #fbbf24")
+        self.query_one(".thinking-header", ClickableHeader).update(header)
         if self._collapsed:
             self.add_class("-collapsed")
         else:
             self.remove_class("-collapsed")
 
-    def _header_text(self) -> Text:
-        text = Text()
-        text.append("  ")
-        text.append("+" if self._collapsed else "-", style="#fbbf24")
-        text.append(" Thinking", style="bold #fbbf24")
-        return text
 
-
-class ToolCallWidget(Static):
+class ToolCallWidget(Vertical):
     DEFAULT_CSS = """
     ToolCallWidget {
         height: auto;
-        color: #2dd4bf;
-        padding: 0 0 0 2;
+        margin: 0 0 1 0;
+    }
+    ToolCallWidget.-collapsed .tool-result {
+        display: none;
+    }
+    .tool-header:hover {
+        background: #18181b;
+    }
+    .tool-result {
+        padding: 0 0 0 4;
+        color: #93c5fd;
     }
     """
 
     def __init__(self, item: dict[str, Any]) -> None:
         super().__init__()
         self._item = item
+        self._collapsed = True
         self._timer = None
         self._frame_index = 0
 
+    def compose(self) -> ComposeResult:
+        yield ClickableHeader(classes="tool-header")
+        yield Static(classes="tool-result")
+
     def on_mount(self) -> None:
-        if self._item.get("status") == "running":
-            self._timer = self.set_interval(0.12, self._tick)
-        self._tick()
+        self.update_item(self._item)
 
     def on_unmount(self) -> None:
         if self._timer is not None:
             self._timer.stop()
+
+    def on_clickable_header_activated(self, event: ClickableHeader.Activated) -> None:
+        if not self._item.get("result_preview"):
+            return
+        self._collapsed = not self._collapsed
+        self._apply()
+
+    def update_item(self, item: dict[str, Any]) -> None:
+        self._item = item
+        status = str(self._item.get("status") or "running")
+        if status == "running":
+            if self._timer is None:
+                self._timer = self.set_interval(0.12, self._tick)
+            else:
+                self._timer.resume()
+        elif self._timer is not None:
+            self._timer.pause()
+        self._tick()
+        result_preview = str(self._item.get("result_preview") or "").strip()
+        result_widget = self.query_one(".tool-result", Static)
+        if result_preview:
+            renderable: Any
+            if result_preview.startswith("```"):
+                renderable = RichMarkdown(result_preview, code_theme="monokai")
+            else:
+                renderable = Text(f"  {result_preview}", style="#93c5fd")
+            result_widget.update(renderable)
+        else:
+            result_widget.update("")
+        self._apply()
 
     def _tick(self) -> None:
         status = str(self._item.get("status") or "running")
@@ -170,6 +211,7 @@ class ToolCallWidget(Static):
         finished_at_ms = self._item.get("finished_at_ms")
         error = str(self._item.get("error") or "").strip()
         cached = bool(self._item.get("cached"))
+        result_preview = str(self._item.get("result_preview") or "").strip()
         now_ms = int(time.monotonic() * 1000)
 
         text = Text("  ")
@@ -185,15 +227,22 @@ class ToolCallWidget(Static):
         if cached:
             text.append(" cached", style="#818cf8")
         if reasoning:
-            text.append(f"  {reasoning[:140]}", style="dim #71717a")
-
+            text.append(f"  {reasoning[:120]}", style="dim #71717a")
         if started_at_ms is not None:
             end_ms = finished_at_ms if finished_at_ms is not None else now_ms
-            elapsed = max(0.0, (end_ms - int(started_at_ms)) / 1000)
-            text.append(f"  {elapsed:.1f}s", style="dim #71717a")
+            text.append(f"  {max(0.0, (int(end_ms) - int(started_at_ms)) / 1000):.1f}s", style="dim #71717a")
+        if result_preview:
+            text.append("  details", style="#fbbf24")
         if error:
-            text.append(f"  {error[:140]}", style="#fbbf24")
-        self.update(text)
+            text.append(f"  {error[:120]}", style="#fbbf24")
+        self.query_one(".tool-header", ClickableHeader).update(text)
+
+    def _apply(self) -> None:
+        has_result = bool(str(self._item.get("result_preview") or "").strip())
+        if self._collapsed or not has_result:
+            self.add_class("-collapsed")
+        else:
+            self.remove_class("-collapsed")
 
 
 class ToolGroupWidget(Vertical):
@@ -211,8 +260,16 @@ class ToolGroupWidget(Vertical):
     def __init__(self, block: dict[str, Any]) -> None:
         super().__init__()
         self._block = block
+        self._tool_widgets: dict[str, ToolCallWidget] = {}
 
     def compose(self) -> ComposeResult:
+        yield Static(classes="tool-group-header")
+
+    def on_mount(self) -> None:
+        self.update_group(self._block)
+
+    def update_group(self, block: dict[str, Any]) -> None:
+        self._block = block
         mode = str(self._block.get("mode") or "sequential")
         batch_index = self._block.get("batch_index")
         header = Text()
@@ -220,48 +277,18 @@ class ToolGroupWidget(Vertical):
         header.append(f"{mode.title()} tools", style="bold #a78bfa")
         if batch_index is not None:
             header.append(f"  batch {batch_index}", style="dim #71717a")
-        yield Static(header, classes="tool-group-header")
+        self.query_one(".tool-group-header", Static).update(header)
         for item in self._block.get("items") or []:
-            if isinstance(item, dict):
-                yield ToolCallWidget(item)
-
-
-class UsageWidget(Static):
-    DEFAULT_CSS = """
-    UsageWidget {
-        height: auto;
-        color: #71717a;
-        margin: 1 0 0 0;
-    }
-    """
-
-    def __init__(self, lines: list[str]) -> None:
-        super().__init__()
-        self._lines = lines
-
-    def on_mount(self) -> None:
-        metrics = [line for line in self._lines if not line.startswith("thinking=")]
-        if not metrics:
-            self.update("")
-            return
-        text = Text()
-        for index, metric in enumerate(metrics):
-            if index:
-                text.append("\n")
-            text.append(f"  {metric}", style="dim #71717a")
-        self.update(text)
-
-
-class WarningWidget(Static):
-    DEFAULT_CSS = """
-    WarningWidget {
-        height: auto;
-        color: #fbbf24;
-    }
-    """
-
-    def __init__(self, warning: str) -> None:
-        super().__init__(f"  ! {warning}")
+            if not isinstance(item, dict):
+                continue
+            call_id = str(item.get("call_id") or item.get("tool_name") or "")
+            widget = self._tool_widgets.get(call_id)
+            if widget is None:
+                widget = ToolCallWidget(item)
+                self.mount(widget)
+                self._tool_widgets[call_id] = widget
+            else:
+                widget.update_item(item)
 
 
 class AssistantMessageWidget(Vertical):
@@ -283,53 +310,73 @@ class AssistantMessageWidget(Vertical):
     def __init__(self, msg: ChatMessage) -> None:
         super().__init__()
         self._msg = msg
+        self._thinking_widgets: list[ThinkingBlockWidget] = []
+        self._tool_group_widgets: list[ToolGroupWidget] = []
+        self._text_widgets: list[Static] = []
+        self._warning_widgets: list[Static] = []
+        self._detail_widgets: list[Static] = []
 
     def compose(self) -> ComposeResult:
+        yield Static(classes="assistant-header")
+
+    def on_mount(self) -> None:
+        self.update_message(self._msg)
+
+    def update_message(self, msg: ChatMessage) -> None:
+        self._msg = msg
         header = Text()
         header.append("  < ", style="bold #8b5cf6")
         header.append("Agent", style="bold #c084fc")
         if self._msg.model:
             header.append(f"  {self._msg.model}", style="dim #71717a")
-        yield Static(header, classes="assistant-header")
+        self.query_one(".assistant-header", Static).update(header)
+
+        for widget in [*self._thinking_widgets, *self._tool_group_widgets, *self._text_widgets, *self._warning_widgets, *self._detail_widgets]:
+            widget.remove()
+        self._thinking_widgets = []
+        self._tool_group_widgets = []
+        self._text_widgets = []
+        self._warning_widgets = []
+        self._detail_widgets = []
 
         blocks = list(self._msg.assistant_blocks)
         if not blocks:
             if self._msg.thinking:
                 blocks.append({"type": "thinking", "text": self._msg.thinking})
-            if self._msg.tool_events:
-                blocks.append(
-                    {
-                        "type": "tool_group",
-                        "mode": "tools",
-                        "items": [
-                            {"call_id": str(index), "tool_name": event, "status": "completed"}
-                            for index, event in enumerate(self._msg.tool_events, start=1)
-                        ],
-                    }
-                )
             if self._msg.text:
                 blocks.append({"type": "text", "text": self._msg.text})
 
         for block in blocks:
             block_type = str(block.get("type") or "")
             if block_type == "thinking":
-                yield ThinkingBlockWidget(str(block.get("text") or ""), collapsed=self._msg.collapse_thinking and not self._msg.is_live)
+                widget = ThinkingBlockWidget(
+                    str(block.get("text") or ""),
+                    collapsed=self._msg.collapse_thinking and not self._msg.is_live,
+                )
+                self.mount(widget)
+                self._thinking_widgets.append(widget)
             elif block_type == "tool_group":
-                yield ToolGroupWidget(block)
+                widget = ToolGroupWidget(block)
+                self.mount(widget)
+                self._tool_group_widgets.append(widget)
             elif block_type == "text":
                 text = str(block.get("text") or "")
                 if text:
-                    yield Static(RichMarkdown(text, code_theme="monokai"))
+                    renderable: Any = RichMarkdown(text, code_theme="monokai")
+                    widget = Static(renderable)
+                    self.mount(widget)
+                    self._text_widgets.append(widget)
 
         for warning in self._msg.warnings[:3]:
-            yield WarningWidget(warning)
+            widget = Static(f"  ! {warning}")
+            self.mount(widget)
+            self._warning_widgets.append(widget)
 
         if self._msg.show_tool_details and self._msg.tool_details:
             for detail in self._msg.tool_details[:12]:
-                yield Static(f"  detail: {_format_tool_detail_line(detail)}", classes="assistant-detail")
-
-        if self._msg.usage_lines:
-            yield UsageWidget(self._msg.usage_lines)
+                widget = Static(f"  detail: {_format_tool_detail_line(detail)}", classes="assistant-detail")
+                self.mount(widget)
+                self._detail_widgets.append(widget)
 
 
 class UserMessageWidget(Vertical):
@@ -385,8 +432,6 @@ class SystemMessageWidget(Static):
 
 
 class ChatLog(VerticalScroll):
-    """Scrollable transcript made of real widgets."""
-
     DEFAULT_CSS = """
     ChatLog {
         background: $surface;
@@ -403,10 +448,15 @@ class ChatLog(VerticalScroll):
     }
     """
 
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._live_widget: AssistantMessageWidget | None = None
+
     def compose(self) -> ComposeResult:
         yield Vertical(id="chat-log-body")
 
     def clear(self) -> None:
+        self._live_widget = None
         body = self.query_one("#chat-log-body", Vertical)
         for child in list(body.children):
             child.remove()
@@ -416,8 +466,23 @@ class ChatLog(VerticalScroll):
         self.scroll_end(animate=False)
 
     def add_assistant_message(self, msg: ChatMessage) -> None:
-        self.query_one("#chat-log-body", Vertical).mount(AssistantMessageWidget(msg))
+        widget = AssistantMessageWidget(msg)
+        self.query_one("#chat-log-body", Vertical).mount(widget)
         self.scroll_end(animate=False)
+
+    def set_live_assistant_message(self, msg: ChatMessage) -> None:
+        body = self.query_one("#chat-log-body", Vertical)
+        if self._live_widget is None:
+            self._live_widget = AssistantMessageWidget(msg)
+            body.mount(self._live_widget)
+        else:
+            self._live_widget.update_message(msg)
+        self.scroll_end(animate=False)
+
+    def clear_live_assistant_message(self) -> None:
+        if self._live_widget is not None:
+            self._live_widget.remove()
+            self._live_widget = None
 
     def add_system_message(self, text: Any, style: str = "dim #71717a") -> None:
         self.query_one("#chat-log-body", Vertical).mount(SystemMessageWidget(text, style=style))
