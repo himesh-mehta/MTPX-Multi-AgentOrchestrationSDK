@@ -93,6 +93,7 @@ class StatusBar(Horizontal):
         sandbox_mode: str = "workspace-write",
         thinking_label: str | None = None,
         thinking_value: str | None = None,
+        is_running: bool = False,
     ) -> None:
         main = Text()
         main.append(" ● ", style="bold #34d399" if backend != "codex" else "bold #c084fc")
@@ -125,7 +126,10 @@ class StatusBar(Horizontal):
 
         hints = Text()
         hints.append("│", style="dim #3f3f46")
-        hints.append("  Ctrl+P", style="#818cf8")
+        if is_running:
+            hints.append("  Esc", style="#38bdf8")
+            hints.append(" interrupt  ", style="dim #71717a")
+        hints.append("Ctrl+P", style="#818cf8")
         hints.append(" commands  ", style="dim #71717a")
         hints.append("Ctrl+B", style="#818cf8")
         hints.append(" sidebar", style="dim #71717a")

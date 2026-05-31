@@ -1,13 +1,20 @@
-"""Chat Log widget with markdown rendering and compact tool surfaces."""
+"""Widget-based chat transcript for the TUI."""
 
 from __future__ import annotations
 
-import re
+import time
 from typing import Any
 
-from rich.markdown import Markdown
+from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
-from textual.widgets import RichLog
+from textual import events
+from textual.app import ComposeResult
+from textual.containers import Vertical, VerticalScroll
+from textual.message import Message
+from textual.widgets import Static
+
+
+_TOOL_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 
 class ChatMessage:
@@ -26,6 +33,9 @@ class ChatMessage:
         "duration_sec",
         "tool_details",
         "show_tool_details",
+        "assistant_blocks",
+        "collapse_thinking",
+        "is_live",
     )
 
     def __init__(
@@ -43,6 +53,9 @@ class ChatMessage:
         duration_sec: float | None = None,
         tool_details: list[dict[str, Any]] | None = None,
         show_tool_details: bool = False,
+        assistant_blocks: list[dict[str, Any]] | None = None,
+        collapse_thinking: bool = True,
+        is_live: bool = False,
     ) -> None:
         self.role = role
         self.text = text
@@ -56,207 +69,387 @@ class ChatMessage:
         self.duration_sec = duration_sec
         self.tool_details = tool_details or []
         self.show_tool_details = show_tool_details
+        self.assistant_blocks = assistant_blocks or []
+        self.collapse_thinking = collapse_thinking
+        self.is_live = is_live
 
 
-class ChatLog(RichLog):
-    """Scrollable rich chat log."""
+class ClickableHeader(Static):
+    """A small clickable header row."""
 
+    class Activated(Message):
+        """Raised when the header is clicked."""
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Activated())
+
+
+class ThinkingBlockWidget(Vertical):
     DEFAULT_CSS = """
-    ChatLog {
-        scrollbar-size: 1 1;
-        scrollbar-color: $accent 40%;
-        scrollbar-color-hover: $accent 60%;
-        scrollbar-color-active: $accent 80%;
+    ThinkingBlockWidget {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    ThinkingBlockWidget.-collapsed .thinking-body {
+        display: none;
+    }
+    .thinking-header {
+        color: #38bdf8;
+    }
+    .thinking-header:hover {
+        background: #18181b;
+    }
+    .thinking-body {
+        padding: 0 0 0 2;
+        color: #71717a;
     }
     """
 
-    def __init__(self, **kwargs: Any):
-        super().__init__(
-            highlight=True,
-            markup=True,
-            wrap=True,
-            auto_scroll=True,
-            min_width=40,
-            **kwargs,
-        )
+    def __init__(self, text: str, *, collapsed: bool = True) -> None:
+        super().__init__()
+        self._text = text
+        self._collapsed = collapsed
 
-    def add_user_message(self, text: str, attachments: list[str] | None = None) -> None:
+    def compose(self) -> ComposeResult:
+        yield ClickableHeader(self._header_text(), classes="thinking-header")
+        yield Static(self._text or "_No thinking captured._", classes="thinking-body")
+
+    def on_clickable_header_activated(self, event: ClickableHeader.Activated) -> None:
+        self._collapsed = not self._collapsed
+        self._apply_state()
+
+    def on_mount(self) -> None:
+        self._apply_state()
+
+    def _apply_state(self) -> None:
+        header = self.query_one(".thinking-header", ClickableHeader)
+        header.update(self._header_text())
+        if self._collapsed:
+            self.add_class("-collapsed")
+        else:
+            self.remove_class("-collapsed")
+
+    def _header_text(self) -> Text:
+        text = Text()
+        text.append("  ")
+        text.append("+" if self._collapsed else "-", style="#fbbf24")
+        text.append(" Thinking", style="bold #fbbf24")
+        return text
+
+
+class ToolCallWidget(Static):
+    DEFAULT_CSS = """
+    ToolCallWidget {
+        height: auto;
+        color: #2dd4bf;
+        padding: 0 0 0 2;
+    }
+    """
+
+    def __init__(self, item: dict[str, Any]) -> None:
+        super().__init__()
+        self._item = item
+        self._timer = None
+        self._frame_index = 0
+
+    def on_mount(self) -> None:
+        if self._item.get("status") == "running":
+            self._timer = self.set_interval(0.12, self._tick)
+        self._tick()
+
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        status = str(self._item.get("status") or "running")
+        tool_name = str(self._item.get("tool_name") or "tool")
+        reasoning = str(self._item.get("reasoning") or "").strip()
+        started_at_ms = self._item.get("started_at_ms")
+        finished_at_ms = self._item.get("finished_at_ms")
+        error = str(self._item.get("error") or "").strip()
+        cached = bool(self._item.get("cached"))
+        now_ms = int(time.monotonic() * 1000)
+
+        text = Text("  ")
+        if status == "running":
+            frame = _TOOL_SPINNER_FRAMES[self._frame_index % len(_TOOL_SPINNER_FRAMES)]
+            self._frame_index += 1
+            text.append(frame, style="#38bdf8")
+        elif status == "completed":
+            text.append("✓", style="#34d399")
+        else:
+            text.append("✕", style="#f43f5e")
+        text.append(f" {tool_name}", style="bold #2dd4bf")
+        if cached:
+            text.append(" cached", style="#818cf8")
+        if reasoning:
+            text.append(f"  {reasoning[:140]}", style="dim #71717a")
+
+        if started_at_ms is not None:
+            end_ms = finished_at_ms if finished_at_ms is not None else now_ms
+            elapsed = max(0.0, (end_ms - int(started_at_ms)) / 1000)
+            text.append(f"  {elapsed:.1f}s", style="dim #71717a")
+        if error:
+            text.append(f"  {error[:140]}", style="#fbbf24")
+        self.update(text)
+
+
+class ToolGroupWidget(Vertical):
+    DEFAULT_CSS = """
+    ToolGroupWidget {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    .tool-group-header {
+        color: #a78bfa;
+        padding: 0 0 0 1;
+    }
+    """
+
+    def __init__(self, block: dict[str, Any]) -> None:
+        super().__init__()
+        self._block = block
+
+    def compose(self) -> ComposeResult:
+        mode = str(self._block.get("mode") or "sequential")
+        batch_index = self._block.get("batch_index")
         header = Text()
-        header.append("  > ", style="bold #ec4899")
-        header.append("You", style="bold #f4f4f6")
-        self.write(header)
+        header.append("  ")
+        header.append(f"{mode.title()} tools", style="bold #a78bfa")
+        if batch_index is not None:
+            header.append(f"  batch {batch_index}", style="dim #71717a")
+        yield Static(header, classes="tool-group-header")
+        for item in self._block.get("items") or []:
+            if isinstance(item, dict):
+                yield ToolCallWidget(item)
 
-        if attachments:
-            att_text = Text("  ")
-            for att in attachments[:5]:
-                att_text.append(f" [file] {att} ", style="#38bdf8 on #1e293b")
-                att_text.append(" ")
-            self.write(att_text)
 
-        self.write(Text(f"  {text}", style="#f4f4f6"))
-        self.write(Text(""))
+class UsageWidget(Static):
+    DEFAULT_CSS = """
+    UsageWidget {
+        height: auto;
+        color: #71717a;
+        margin: 1 0 0 0;
+    }
+    """
 
-    def add_assistant_message(self, msg: ChatMessage) -> None:
-        if msg.thinking:
-            self._render_thinking(msg.thinking)
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__()
+        self._lines = lines
 
-        if msg.tool_events:
-            self._render_tool_events(msg.tool_events)
-            if msg.show_tool_details and msg.tool_details:
-                self._render_tool_details(msg.tool_details)
+    def on_mount(self) -> None:
+        metrics = [line for line in self._lines if not line.startswith("thinking=")]
+        if not metrics:
+            self.update("")
+            return
+        text = Text()
+        for index, metric in enumerate(metrics):
+            if index:
+                text.append("\n")
+            text.append(f"  {metric}", style="dim #71717a")
+        self.update(text)
 
-        if msg.warnings:
-            for warning in msg.warnings[:3]:
-                warn_text = Text()
-                warn_text.append("  ! ", style="bold #fbbf24")
-                warn_text.append(warning, style="#fbbf24")
-                self.write(warn_text)
 
+class WarningWidget(Static):
+    DEFAULT_CSS = """
+    WarningWidget {
+        height: auto;
+        color: #fbbf24;
+    }
+    """
+
+    def __init__(self, warning: str) -> None:
+        super().__init__(f"  ! {warning}")
+
+
+class AssistantMessageWidget(Vertical):
+    DEFAULT_CSS = """
+    AssistantMessageWidget {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    .assistant-header {
+        height: auto;
+    }
+    .assistant-detail {
+        height: auto;
+        color: #93c5fd;
+        padding: 0 0 0 2;
+    }
+    """
+
+    def __init__(self, msg: ChatMessage) -> None:
+        super().__init__()
+        self._msg = msg
+
+    def compose(self) -> ComposeResult:
         header = Text()
         header.append("  < ", style="bold #8b5cf6")
         header.append("Agent", style="bold #c084fc")
-        if msg.model:
-            header.append(f"  {msg.model}", style="dim #71717a")
-        self.write(header)
+        if self._msg.model:
+            header.append(f"  {self._msg.model}", style="dim #71717a")
+        yield Static(header, classes="assistant-header")
 
-        if msg.text:
-            try:
-                self.write(Markdown(msg.text, code_theme="monokai"))
-            except Exception:
-                self.write(Text(f"  {msg.text}", style="#f4f4f6"))
+        blocks = list(self._msg.assistant_blocks)
+        if not blocks:
+            if self._msg.thinking:
+                blocks.append({"type": "thinking", "text": self._msg.thinking})
+            if self._msg.tool_events:
+                blocks.append(
+                    {
+                        "type": "tool_group",
+                        "mode": "tools",
+                        "items": [
+                            {"call_id": str(index), "tool_name": event, "status": "completed"}
+                            for index, event in enumerate(self._msg.tool_events, start=1)
+                        ],
+                    }
+                )
+            if self._msg.text:
+                blocks.append({"type": "text", "text": self._msg.text})
 
-        if msg.usage_lines:
-            self.write(Text(""))
-            self._render_usage(msg.usage_lines, msg.duration_sec)
+        for block in blocks:
+            block_type = str(block.get("type") or "")
+            if block_type == "thinking":
+                yield ThinkingBlockWidget(str(block.get("text") or ""), collapsed=self._msg.collapse_thinking and not self._msg.is_live)
+            elif block_type == "tool_group":
+                yield ToolGroupWidget(block)
+            elif block_type == "text":
+                text = str(block.get("text") or "")
+                if text:
+                    yield Static(RichMarkdown(text, code_theme="monokai"))
 
-        self.write(Text(""))
+        for warning in self._msg.warnings[:3]:
+            yield WarningWidget(warning)
 
-    def add_system_message(self, text: str, style: str = "dim #71717a") -> None:
-        self.write(Text(f"  {text}", style=style))
+        if self._msg.show_tool_details and self._msg.tool_details:
+            for detail in self._msg.tool_details[:12]:
+                yield Static(f"  detail: {_format_tool_detail_line(detail)}", classes="assistant-detail")
+
+        if self._msg.usage_lines:
+            yield UsageWidget(self._msg.usage_lines)
+
+
+class UserMessageWidget(Vertical):
+    DEFAULT_CSS = """
+    UserMessageWidget {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    .user-header {
+        height: auto;
+    }
+    .user-attachments {
+        height: auto;
+        color: #38bdf8;
+    }
+    .user-body {
+        height: auto;
+        color: #f4f4f6;
+    }
+    """
+
+    def __init__(self, text: str, attachments: list[str] | None = None) -> None:
+        super().__init__()
+        self._text = text
+        self._attachments = attachments or []
+
+    def compose(self) -> ComposeResult:
+        header = Text()
+        header.append("  > ", style="bold #ec4899")
+        header.append("You", style="bold #f4f4f6")
+        yield Static(header, classes="user-header")
+        if self._attachments:
+            att_text = Text("  ")
+            for att in self._attachments[:5]:
+                att_text.append(f"[file] {att} ", style="#38bdf8 on #1e293b")
+                att_text.append(" ")
+            yield Static(att_text, classes="user-attachments")
+        yield Static(f"  {self._text}", classes="user-body")
+
+
+class SystemMessageWidget(Static):
+    DEFAULT_CSS = """
+    SystemMessageWidget {
+        height: auto;
+        color: #71717a;
+        margin: 0 0 1 0;
+    }
+    """
+
+    def __init__(self, text: Any, *, style: str = "dim #71717a") -> None:
+        renderable = text if not isinstance(text, str) else Text(str(text), style=style)
+        super().__init__(renderable)
+
+
+class ChatLog(VerticalScroll):
+    """Scrollable transcript made of real widgets."""
+
+    DEFAULT_CSS = """
+    ChatLog {
+        background: $surface;
+        border: none;
+        padding: 1 2;
+        scrollbar-size: 1 1;
+        scrollbar-color: $accent 30%;
+        scrollbar-color-hover: $accent 50%;
+        scrollbar-color-active: $accent 70%;
+    }
+    #chat-log-body {
+        height: auto;
+        width: 1fr;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(id="chat-log-body")
+
+    def clear(self) -> None:
+        body = self.query_one("#chat-log-body", Vertical)
+        for child in list(body.children):
+            child.remove()
+
+    def add_user_message(self, text: str, attachments: list[str] | None = None) -> None:
+        self.query_one("#chat-log-body", Vertical).mount(UserMessageWidget(text, attachments))
+        self.scroll_end(animate=False)
+
+    def add_assistant_message(self, msg: ChatMessage) -> None:
+        self.query_one("#chat-log-body", Vertical).mount(AssistantMessageWidget(msg))
+        self.scroll_end(animate=False)
+
+    def add_system_message(self, text: Any, style: str = "dim #71717a") -> None:
+        self.query_one("#chat-log-body", Vertical).mount(SystemMessageWidget(text, style=style))
+        self.scroll_end(animate=False)
 
     def add_command_result(self, text: str) -> None:
-        cleaned = re.sub(r"\033\[[0-9;]*m", "", text)
-        self.write(Text(f"  {cleaned}", style="#a78bfa"))
-        self.write(Text(""))
+        self.query_one("#chat-log-body", Vertical).mount(SystemMessageWidget(f"  {text}", style="#a78bfa"))
+        self.scroll_end(animate=False)
 
-    def _render_thinking(self, thinking: str) -> None:
-        header = Text()
-        header.append("  +- ", style="#3f3f46")
-        header.append("Reasoning", style="bold #38bdf8")
-        self.write(header)
 
-        lines = thinking.split(" | ") if " | " in thinking else thinking.splitlines()
-        display_lines = lines[:8] if len(lines) > 8 else lines
-        for line in display_lines:
-            trace_text = Text()
-            trace_text.append("  |  ", style="#3f3f46")
-            trace_text.append(line.strip()[:200], style="dim #71717a")
-            self.write(trace_text)
-        if len(lines) > 8:
-            self.write(Text(f"  |  ... {len(lines) - 8} more steps", style="dim #71717a italic"))
-
-        self.write(Text("  +-----", style="#3f3f46"))
-
-    def _render_tool_events(self, events: list[str]) -> None:
-        self.write(Text(f"  * {len(events)} tool events", style="#a78bfa"))
-
-        visible_events = events[:5]
-        for index, event in enumerate(visible_events):
-            connector = "\\-" if index == len(visible_events) - 1 and len(events) <= 5 else "+-"
-            tool_text = Text()
-            tool_text.append(f"  |  {connector} ", style="dim #3f3f46")
-            clean = event.replace("🔧 ", "")
-            tool_text.append(clean[:120], style="#2dd4bf")
-            self.write(tool_text)
-
-        if len(events) > 5:
-            more = Text()
-            more.append(f"  |  \\- ... {len(events) - 5} more ", style="dim #3f3f46")
-            more.append("(/details for metadata)", style="dim italic #818cf8")
-            self.write(more)
-
-    def _render_tool_details(self, details: list[dict[str, Any]]) -> None:
-        self.write(Text("  tool details", style="bold #818cf8"))
-        for detail in details[:12]:
-            dtype = str(detail.get("type") or "detail")
-            line = Text("  |  ", style="dim #3f3f46")
-            if dtype == "plan_received":
-                source = detail.get("tool_call_source") or "unknown"
-                raw_calls = detail.get("raw_tool_call_count")
-                batch_count = detail.get("derived_batch_count")
-                modes = ",".join(str(mode) for mode in detail.get("derived_batch_modes") or []) or "-"
-                line.append(
-                    f"plan source={source} raw_calls={raw_calls} batches={batch_count} modes={modes}",
-                    style="#93c5fd",
-                )
-            elif dtype == "batch_started":
-                batch_index = detail.get("batch_index")
-                mode = detail.get("mode") or "unknown"
-                call_ids = ",".join(str(call_id) for call_id in detail.get("call_ids") or []) or "-"
-                line.append(f"batch#{batch_index} mode={mode} call_ids={call_ids}", style="#93c5fd")
-            elif dtype == "tool_started":
-                tool_name = detail.get("tool_name") or "unknown"
-                call_id = detail.get("call_id") or "-"
-                depends_on = ",".join(str(dep) for dep in detail.get("depends_on") or []) or "-"
-                line.append(
-                    f"start {tool_name} call_id={call_id} depends_on={depends_on}",
-                    style="#93c5fd",
-                )
-            elif dtype == "tool_finished":
-                tool_name = detail.get("tool_name") or "unknown"
-                call_id = detail.get("call_id") or "-"
-                success = detail.get("success")
-                cached = detail.get("cached")
-                line.append(
-                    f"finish {tool_name} call_id={call_id} success={success} cached={cached}",
-                    style="#93c5fd",
-                )
-            else:
-                line.append(str(detail)[:200], style="#93c5fd")
-            self.write(line)
-        if len(details) > 12:
-            self.write(Text(f"  |  ... {len(details) - 12} more detail items", style="dim #71717a"))
-
-    def _render_usage(self, lines: list[str], duration_sec: float | None = None) -> None:
-        metrics: list[str] = []
-        for line in lines:
-            if line.startswith("thinking="):
-                continue
-            metrics.append(line)
-
-        if not metrics:
-            return
-
-        for metric in metrics:
-            match = re.match(r"context_window=([\d,]+)/([\d,]+)", metric)
-            if match:
-                used = int(match.group(1).replace(",", ""))
-                total = int(match.group(2).replace(",", ""))
-                self._render_context_bar(used, total, duration_sec)
-                break
-
-        compact = "  ".join(metric for metric in metrics[:3] if not metric.startswith("context_window="))
-        if compact:
-            self.write(Text(f"  {compact}", style="dim #71717a"))
-
-    def _render_context_bar(self, used: int, total: int, duration_sec: float | None = None) -> None:
-        bar_width = 20
-        pct = min(1.0, used / max(1, total))
-        filled = int(pct * bar_width)
-        empty = bar_width - filled
-
-        if pct < 0.6:
-            color = "#34d399"
-        elif pct < 0.85:
-            color = "#fbbf24"
-        else:
-            color = "#f43f5e"
-
-        bar = Text("  ctx ")
-        bar.append("#" * filled, style=color)
-        bar.append("-" * empty, style="dim #3f3f46")
-        bar.append(f" {pct * 100:.0f}% ", style=color)
-        bar.append(f"{used:,} / {total:,} tokens", style="dim #71717a")
-        if duration_sec is not None:
-            bar.append(f"  {duration_sec:.1f}s", style="dim #38bdf8")
-        self.write(bar)
+def _format_tool_detail_line(detail: dict[str, Any]) -> str:
+    dtype = str(detail.get("type") or "detail")
+    if dtype == "plan_received":
+        source = detail.get("tool_call_source") or "unknown"
+        raw_calls = detail.get("raw_tool_call_count")
+        batch_count = detail.get("derived_batch_count")
+        modes = ",".join(str(mode) for mode in detail.get("derived_batch_modes") or []) or "-"
+        return f"plan source={source} raw_calls={raw_calls} batches={batch_count} modes={modes}"
+    if dtype == "batch_started":
+        batch_index = detail.get("batch_index")
+        mode = detail.get("mode") or "unknown"
+        call_ids = ",".join(str(call_id) for call_id in detail.get("call_ids") or []) or "-"
+        return f"batch#{batch_index} mode={mode} call_ids={call_ids}"
+    if dtype == "tool_started":
+        tool_name = detail.get("tool_name") or "unknown"
+        call_id = detail.get("call_id") or "-"
+        depends_on = ",".join(str(dep) for dep in detail.get("depends_on") or []) or "-"
+        return f"start {tool_name} call_id={call_id} depends_on={depends_on}"
+    if dtype == "tool_finished":
+        tool_name = detail.get("tool_name") or "unknown"
+        call_id = detail.get("call_id") or "-"
+        success = detail.get("success")
+        cached = detail.get("cached")
+        return f"finish {tool_name} call_id={call_id} success={success} cached={cached}"
+    return str(detail)[:200]
