@@ -94,7 +94,7 @@ export function MarketingNavbar() {
             rel="noopener noreferrer"
             className="px-3 py-1.5 rounded-full text-[11px] font-mono font-medium border border-white/10 text-white/40 hover:text-white/70 hover:border-white/20 transition-all"
           >
-            v0.1.17
+            v0.1.30
           </a>
 
           {/* CTA */}
