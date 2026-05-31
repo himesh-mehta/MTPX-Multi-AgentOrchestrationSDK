@@ -69,6 +69,49 @@ class ToolArgumentsValidationError(ValueError):
     pass
 
 
+def _coerce_scalar(expected: str, value: Any) -> Any:
+    if expected == "integer":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if re.fullmatch(r"[+-]?\d+", stripped):
+                try:
+                    return int(stripped)
+                except Exception:
+                    return value
+        return value
+    if expected == "number":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", stripped):
+                try:
+                    number = float(stripped)
+                except Exception:
+                    return value
+                return int(number) if number.is_integer() else number
+        return value
+    if expected == "boolean" and isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        return value
+    if expected == "null" and isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"null", "none"}:
+            return None
+        return value
+    return value
+
+
 def _validate_schema_type(expected: str, value: Any) -> bool:
     if expected == "object":
         return isinstance(value, dict)
@@ -253,6 +296,95 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, root_schema: 
         pattern = schema.get("pattern")
         if isinstance(pattern, str) and re.search(pattern, value) is None:
             raise ToolArgumentsValidationError(f"{path}: does not match pattern {pattern!r}")
+
+
+def _coerce_value(value: Any, schema: dict[str, Any], root_schema: dict[str, Any]) -> Any:
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(ref, root_schema)
+        if resolved is not None:
+            return _coerce_value(value, resolved, root_schema)
+        return value
+
+    combinators = []
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        combinators.append(any_of)
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        combinators.append(one_of)
+    for branches in combinators:
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            candidate = _coerce_value(value, branch, root_schema)
+            try:
+                _validate_value(candidate, branch, "$", root_schema)
+                return candidate
+            except ToolArgumentsValidationError:
+                continue
+
+    expected_type = schema.get("type")
+    if isinstance(expected_type, list):
+        for item in expected_type:
+            if not isinstance(item, str):
+                continue
+            candidate = _coerce_value(value, {"type": item}, root_schema)
+            if _validate_schema_type(item, candidate):
+                return candidate
+        return value
+
+    if expected_type == "object":
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    parsed = value
+                else:
+                    value = parsed
+        if isinstance(value, dict):
+            properties = schema.get("properties")
+            if not isinstance(properties, dict):
+                return value
+            coerced: dict[str, Any] = {}
+            for key, item in value.items():
+                child_schema = properties.get(key)
+                if isinstance(child_schema, dict):
+                    coerced[key] = _coerce_value(item, child_schema, root_schema)
+                else:
+                    coerced[key] = item
+            return coerced
+        return value
+
+    if expected_type == "array":
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    parsed = value
+                else:
+                    value = parsed
+        if isinstance(value, list):
+            item_schema = schema.get("items")
+            if not isinstance(item_schema, dict):
+                return value
+            return [_coerce_value(item, item_schema, root_schema) for item in value]
+        return value
+
+    if isinstance(expected_type, str):
+        return _coerce_scalar(expected_type, value)
+    return value
+
+
+def coerce_tool_arguments(arguments: dict[str, Any], input_schema: dict[str, Any] | None) -> dict[str, Any]:
+    if input_schema is None:
+        return arguments
+    coerced = _coerce_value(arguments, input_schema, input_schema)
+    return coerced if isinstance(coerced, dict) else arguments
 
 
 def validate_tool_arguments(arguments: dict[str, Any], input_schema: dict[str, Any] | None) -> None:

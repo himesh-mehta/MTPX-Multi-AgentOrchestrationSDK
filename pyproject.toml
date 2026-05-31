@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mtpx"
-version = "0.1.30"
+version = "0.1.31"
 description = "MTPX: Model Tool Protocol and agent runtime for Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -115,3 +115,7 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
