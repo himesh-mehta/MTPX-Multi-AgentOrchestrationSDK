@@ -1,270 +1,193 @@
- MTPX (Model Tool Protocol Extended)
+# MTPX: Multi-Agent Orchestration SDK
 
 [![PyPI version](https://badge.fury.io/py/mtpx.svg)](https://pypi.org/project/mtpx/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docs](https://img.shields.io/badge/Docs-Live-brightgreen)](https://mtp-frontend-zeta.vercel.app/)
 
-MTPX is a protocol-first Python library for agent tool orchestration, built to support:
-- Lazy tool loading by toolkit/category.
-- Dependency-aware batch tool execution.
-- Policy-aware execution based on tool risk.
-- Multi-round model-tool-model loops.
-- Provider adapters (now including Groq, Gemini, OpenAi, Anthropic, Openrouter, etc.).
-- Transport primitives (stdio + HTTP + optional WebSocket envelope transport).
-- Experimental MCP JSON-RPC adapter over the same runtime core.
+MTPX (Model Tool Protocol Extended) is a protocol-first Python library for advanced agent tool orchestration. It is designed to act as a highly extensible runtime engine for agent-to-tool and agent-to-agent workflows.
 
-## Direction
+---
 
-This project has two explicit layers:
+## 🌐 Live Platform & Documentation
 
-- `MTP protocol`: protocol entities and execution semantics.
-- `MTP Agent SDK`: framework/runtime/providers/toolkits/transports built on top of MTP.
+The official documentation, guides, and SDK references are hosted on the live platform:
+🔗 **[MTPX Live Documentation Portal](https://mtp-frontend-zeta.vercel.app/)**
 
-MCP support is an interoperability capability, not the product identity.
+### 🖼️ Landing Page & Showcase
 
-Canonical direction document:
-- [Project Direction](docs/PROJECT_DIRECTION.md)
+![MTPX Landing Page Hero](assets/landing_hero.png)
 
-## Quickstart
+---
 
-## Install
+## 📖 Deployed Documentation Quick Links
 
-### From PyPI (recommended)
+To help you get started quickly, here is a mapping of key sections from the live docs:
 
+| 🧭 Core Concepts | 🛠️ Developer Guides | 🛡️ Safety & Observability |
+| :--- | :--- | :--- |
+| • [Introduction](https://mtp-frontend-zeta.vercel.app/docs/introduction)<br>• [Planner vs Runtime](https://mtp-frontend-zeta.vercel.app/docs/planner-vs-runtime)<br>• [Execution Flow](https://mtp-frontend-zeta.vercel.app/docs/execution-flow) | • [Quickstart Guide](https://mtp-frontend-zeta.vercel.app/docs/quickstart)<br>• [Installation Details](https://mtp-frontend-zeta.vercel.app/docs/installation)<br>• [Custom Providers](https://mtp-frontend-zeta.vercel.app/docs/provider-custom) | • [Risk Policies & Levels](https://mtp-frontend-zeta.vercel.app/docs/safety-risk-levels)<br>• [Approval Gates](https://mtp-frontend-zeta.vercel.app/docs/safety-approval)<br>• [Tool Sandboxing](https://mtp-frontend-zeta.vercel.app/docs/safety-sandboxing) |
+| • [DAG Resolution](https://mtp-frontend-zeta.vercel.app/docs/dag-resolution)<br>• [State Persistence](https://mtp-frontend-zeta.vercel.app/docs/state-persistence)<br>• [Event Bus Architecture](https://mtp-frontend-zeta.vercel.app/docs/event-bus) | • [SDK Reference: Agent](https://mtp-frontend-zeta.vercel.app/docs/sdk-agent)<br>• [SDK Reference: Runtime](https://mtp-frontend-zeta.vercel.app/docs/sdk-runtime)<br>• [SDK Reference: Session](https://mtp-frontend-zeta.vercel.app/docs/sdk-session) | • [Event Streaming](https://mtp-frontend-zeta.vercel.app/docs/obs-streaming)<br>• [TUI Monitoring](https://mtp-frontend-zeta.vercel.app/docs/obs-tui)<br>• [Execution Traces](https://mtp-frontend-zeta.vercel.app/docs/obs-traces) |
+
+### 📄 Interactive Docs Portal
+
+![MTPX Documentation Interface](assets/docs_landing.png)
+
+---
+
+## ✨ Features
+
+- **Lazy Tool Loading**: Group and load toolkits dynamically by category or risk profile.
+- **Dependency-Aware DAG Engine**: Resolve execution order for complex, multi-tool tasks automatically.
+- **Policy-Aware Sandbox Execution**: Fine-grained security permissions (`allow`, `ask`, `deny`) for tool execution.
+- **Multi-Round Conversation Loops**: Robust state management for model-tool interactions.
+- **Extensible Provider Adapters**: Seamless integrations for OpenAI, Anthropic, Gemini, Groq, Ollama, SambaNova, DeepSeek, and more.
+- **Transport Primitives**: Stdio, HTTP, and WebSocket transport envelopes.
+
+---
+
+## 🚀 Quickstart
+
+### 1. Installation
+
+Install via PyPI:
 ```bash
 pip install mtpx
 ```
 
-Common optional installs:
-
+Or install with specific provider dependencies:
 ```bash
-# Groq + dotenv helper
-pip install "mtpx[groq,dotenv]"
-
-# LM Studio local inference
-pip install "mtpx[lmstudio]"
-
-# Ollama local inference
-pip install "mtpx[ollama]"
-
-# OpenAI + Anthropic providers
+# OpenAI + Anthropic + dotenv support
 pip install "mtpx[openai,anthropic,dotenv]"
 
-# Web toolkits
-pip install "mtpx[toolkits-web]"
+# Local model providers (Ollama / LM Studio)
+pip install "mtpx[ollama,lmstudio]"
 
-# Database session stores
-pip install "mtpx[stores-db]"
+# Groq support
+pip install "mtpx[groq,dotenv]"
 
-# Everything optional
+# Install everything
 pip install "mtpx[all]"
 ```
 
-`python-dotenv` is optional. MTP does not auto-read `.env` files unless you install the dotenv extra and call `Agent.load_dotenv_if_available()`, or you load env vars yourself.
-
-Verify installation:
+Verify your installation:
 ```bash
-python -c "import mtp; print(f'MTPX version {mtp.__version__} installed successfully!')"
+python -c "import mtp; print(f'MTPX version {mtp.__version__} successfully installed!')"
 ```
 
-### From source (for development)
+### 2. Basic Usage (Groq example)
 
-```bash
-git clone https://github.com/yourusername/MTP.git  # Replace with your actual repo URL
-cd MTP
-python -m venv .venv
-.venv\Scripts\activate  # On Windows
-# source .venv/bin/activate  # On Linux/Mac
-pip install -e .
-```
-
-### Provider SDKs and dotenv (explicit alternative)
-
-```bash
-pip install "mtpx[groq,dotenv]"
-```
-
-Copy `.env.example` to `.env` and set your key, or export the key in your shell/session:
-
-```env
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-## Create an agent (local toolkits + Groq)
+Create a file named `run_agent.py` and run:
 
 ```python
 from mtp import Agent
 from mtp.providers import Groq
-from mtp.toolkits import CalculatorToolkit, FileToolkit, PythonToolkit, ShellToolkit
+from mtp.toolkits import CalculatorToolkit, FileToolkit
 
 Agent.load_dotenv_if_available()
 
+# Set up tool registry
 tools = Agent.ToolRegistry()
 tools.register_toolkit_loader("calculator", CalculatorToolkit())
 tools.register_toolkit_loader("file", FileToolkit(base_dir="."))
-tools.register_toolkit_loader("python", PythonToolkit(base_dir="."))
-tools.register_toolkit_loader("shell", ShellToolkit(base_dir="."))
 
+# Configure LLM provider
 provider = Groq(model="llama-3.3-70b-versatile")
 
+# Start Agent loop
 agent = Agent.MTPAgent(
     provider=provider,
     tools=tools,
-    instructions="Use tools when needed and return concise answers.",
-    debug_mode=True,
-    strict_dependency_mode=True,
+    instructions="Use tools when appropriate to answer query.",
+    debug_mode=True
 )
-response = agent.run("Calculate 25*4+10 and list files in current directory.", max_rounds=4)
+
+# Run a task
+response = agent.run("Calculate 25 * 4 + 10 and list files in current directory.", max_rounds=4)
 print(response)
-
-# Stream final response tokens:
-agent.print_response("Give me a short summary.", max_rounds=4, stream=True)
-
-# Stream structured runtime events (readable terminal logs by default):
-agent.print_response("Give me a short summary.", max_rounds=4, stream=True, stream_events=True)
-# Raw JSON lines:
-agent.print_response("Give me a short summary.", max_rounds=4, stream=True, stream_events=True, event_format="json")
 ```
 
-If you do not call `Agent.load_dotenv_if_available()`, the provider will only read API keys that already exist in the process environment, such as `GROQ_API_KEY`, `OPENAI_API_KEY`, or `MIMO_API_KEY`.
+---
 
-### Autoresearch mode (persistent execution)
+## 🗄️ Stateful Sessions (Persistence)
 
-`autoresearch=True` enables persistent run behavior. The model is expected to end only when it calls `agent.terminate(...)`, or when user/system limits stop the run.
-
-```python
-agent = Agent.MTPAgent(
-    provider=provider,
-    tools=tools,
-    autoresearch=True,
-    research_instructions=(
-        "Keep working until requirements are satisfied and verified. "
-        "Call agent.terminate with reason+summary only when complete."
-    ),
-    debug_mode=True,
-)
-
-agent.print_response(
-    "Compute the result and verify with tools. Terminate only after completion.",
-    max_rounds=12,
-    stream=True,
-    stream_events=True,
-)
-```
-
-## Persist conversation sessions (JSON database)
+Persist conversations out-of-the-box using the built-in database adapters:
 
 ```python
 from mtp import Agent, JsonSessionStore
 from mtp.providers import OpenAI
 
+# Store conversations in a local JSON database
 session_store = JsonSessionStore(db_path="tmp/mtp_json_db")
-agent = Agent.MTPAgent(provider=OpenAI(model="gpt-4o"), tools=tools, session_store=session_store)
+agent = Agent.MTPAgent(
+    provider=OpenAI(model="gpt-4o"), 
+    tools=tools, 
+    session_store=session_store
+)
 
-agent.run("Remember this: project codename is Atlas.", session_id="chat-1", user_id="u1")
-agent.run("What is the project codename?", session_id="chat-1", user_id="u1")
+# Run with a session ID
+agent.run("Remember this: the secret password is 'Antigravity'.", session_id="session-1", user_id="user-1")
+agent.run("What was the password?", session_id="session-1", user_id="user-1")
 ```
 
-PostgreSQL and MySQL session stores are also available:
-
+We also support production databases:
 ```python
 from mtp import PostgresSessionStore, MySQLSessionStore
 
 pg_store = PostgresSessionStore(db_url="postgresql://user:pass@localhost:5432/mtp")
-my_store = MySQLSessionStore(
-    host="localhost",
-    user="root",
-    password="secret",
-    database="mtp",
-    port=3306,
-)
+mysql_store = MySQLSessionStore(host="localhost", user="root", password="pwd", database="mtp")
 ```
 
-**TUI Session Management:**
-The MTP TUI provides enhanced session management with:
-- **Auto-generated titles** from your first message (e.g., "How do I implement" from "How do I implement authentication")
-- **Centralized storage** in `~/.mtp/sessions/` - all sessions from all projects in one place
-- **Directory grouping** - sessions organized by project when listed
-- **Cross-project access** - resume sessions from any directory
-- Use `/sessions` to list all sessions, `/new [label]` to start a new session with optional custom label
+---
 
-## Run examples
+## 🖥️ Running Examples & Interactive TUI
 
+Execute the following examples included in the repository:
 ```bash
+# Simple scripts
 python examples/quickstart.py
 python examples/groq_agent.py
-python examples/groq_agent_events.py
-python examples/ollama_agent.py
 python examples/lmstudio_agent.py
-python examples/mcp_stdio_server.py
-```
 
-### Interactive TUI with Local Inference
-
-```bash
-# Install with local inference support
-pip install -e ".[ollama,lmstudio]"
-
-# Start TUI
+# Launch the interactive terminal console (TUI)
 mtp tui
 
-# Switch to local provider
-/backend ollama
-
-# Follow interactive setup to select model
-# Start chatting with your local LLM!
-```
-
-### Streamlit UI
-
-```bash
-pip install -e ".[groq,dotenv,ui-streamlit]"
+# Launch the Streamlit Web UI
 streamlit run examples/streamlit_groq_agent_chat.py
 ```
 
-### Agent OS
+---
 
-```bash
-pip install -e ".[dotenv,ui-streamlit,groq,openai,openrouter]"
-mtp agent-os
-```
+## 📂 Repository Layout
 
-## Docs map
-- [Quickstart](docs/QUICKSTART.md)
+- `src/mtp/protocol.py`: Standardized protocol entities (`ToolSpec`, `ToolCall`, `ExecutionPlan`).
+- `src/mtp/schema.py`: Versioned JSON envelopes and schema verification.
+- `src/mtp/policy.py`: Execution security model (`allow` / `ask` / `deny`).
+- `src/mtp/runtime.py`: Tool loading registry, cache manager, DAG executor.
+- `src/mtp/agent.py`: Principal agent orchestration loop.
+- `src/mtp/providers/`: Direct LLM API adapters.
+- `src/mtp/toolkits/`: Default tool suites (calculator, file, shell, python execution).
+- `docs/`: In-repository documentation files.
+
+For a complete local documentation map, refer to:
+- [Quickstart Guide](docs/QUICKSTART.md)
 - [Agent API Reference](docs/AGENT_API.md)
-- [Storage and Sessions](docs/STORAGE.md)
-- [Providers](docs/PROVIDERS.md)
-- [Local Inference (LM Studio + Ollama)](docs/LOCAL_INFERENCE.md)
-- [Creating Tools](docs/CREATING_TOOLS.md)
-- [Events Contract](docs/EVENTS.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Project Direction](docs/PROJECT_DIRECTION.md)
-- [Protocol Spec](docs/PROTOCOL_SPEC.md)
-- [Local Toolkits](docs/LOCAL_TOOLKITS.md)
-- [Groq Integration](docs/GROQ_INTEGRATION.md)
-- [Transport](docs/TRANSPORT.md)
-- [MCP Interop Adapter](docs/MCP_INTEROP.md)
-- [Publishing](docs/PUBLISHING.md)
-- [Testing](docs/TESTING.md)
+- [Storage & Sessions](docs/STORAGE.md)
+- [Providers Overview](docs/PROVIDERS.md)
+- [Local Inference](docs/LOCAL_INFERENCE.md)
+- [Creating Custom Tools](docs/CREATING_TOOLS.md)
+- [Architecture Details](docs/ARCHITECTURE.md)
 
-## Repository structure
-- `src/mtp/protocol.py`: Core protocol entities (`ToolSpec`, `ToolCall`, `ExecutionPlan`, etc.).
-- `src/mtp/schema.py`: Versioned envelope + execution plan validation.
-- `src/mtp/policy.py`: Risk policy (`allow` / `ask` / `deny`).
-- `src/mtp/runtime.py`: Tool registry, lazy loading, caching, batch execution.
-- `src/mtp/agent.py`: Agent loop around provider + runtime.
-- `src/mtp/toolkits/`: Local toolkits (`calculator`, `file`, `python`, `shell`).
-- `src/mtp/transport/`: Envelope transport over stdio and HTTP.
-- `src/mtp/mcp.py`: MCP-compatible JSON-RPC adapter around `ToolRegistry`.
-- `src/mtp/providers/`: Provider adapters (`MockPlannerProvider` + OpenAI/LMStudio/Ollama/Groq/OpenRouter/Gemini/Anthropic/SambaNova/Cerebras/DeepSeek/Mistral/Cohere/TogetherAI/FireworksAI).
-- `docs/`: documentation and implementation guides.
+---
 
-## Contributors
+## 👥 Contributors
 
 Created by [Prajwal Ghadge](mailto:prajwalghadge2005@gmail.com) with contributions from Himesh Mehta.
 
-See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the full list of contributors.
+Please see [CONTRIBUTORS.md](CONTRIBUTORS.md) for details.
 
-## License
+---
 
-MIT License - see LICENSE file for details.
+## 📄 License
+
+Distributed under the MIT License. See [LICENSE](LICENSE) for more details.
