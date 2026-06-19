@@ -156,6 +156,10 @@ mtp tui
 streamlit run examples/streamlit_groq_agent_chat.py
 ```
 
+### 🖥️ MTP Interactive Terminal User Interface (TUI)
+
+![MTP Interactive TUI](assets/tui_showcase.png)
+
 ---
 
 ## 📂 Repository Layout
