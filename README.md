@@ -5,6 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docs](https://img.shields.io/badge/Docs-Live-brightgreen)](https://mtp-frontend-zeta.vercel.app/)
 
+![MTP Interactive TUI](assets/tui_showcase.png)
+
 MTPX (Model Tool Protocol Extended) is a protocol-first Python library for advanced agent tool orchestration. It is designed to act as a highly extensible runtime engine for agent-to-tool and agent-to-agent workflows.
 
 ---
@@ -155,10 +157,6 @@ mtp tui
 # Launch the Streamlit Web UI
 streamlit run examples/streamlit_groq_agent_chat.py
 ```
-
-### 🖥️ MTP Interactive Terminal User Interface (TUI)
-
-![MTP Interactive TUI](assets/tui_showcase.png)
 
 ---
 
