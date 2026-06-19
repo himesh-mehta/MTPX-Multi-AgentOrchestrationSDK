@@ -75,9 +75,31 @@ def record_turn(state: TUIState, prompt: str, result: ChatResult) -> None:
         warnings=list(result.warnings),
         usage_lines=list(result.usage_lines),
         created_at=now_label(),
+        tool_details=list(result.tool_details),
+        assistant_blocks=list(result.assistant_blocks),
+        thinking_text=result.thinking_text,
     ))
     state.last_usage_lines = list(result.usage_lines)
+    state.last_tool_details = list(result.tool_details)
     save_tui_session(state)
+    _record_codebase_conversation_summary(state, prompt, result)
+
+
+def _record_codebase_conversation_summary(state: TUIState, prompt: str, result: ChatResult) -> None:
+    """Store a lightweight post-turn summary when codebase memory is enabled."""
+    try:
+        from mtp.codebase import CodebaseMemory
+
+        memory = CodebaseMemory(state.cwd)
+        memory.record_conversation_summary(
+            session_id=state.session_id,
+            prompt=prompt,
+            response=result.text,
+            backend=state.backend,
+            model=active_model_name(state),
+        )
+    except Exception:
+        return
 
 
 # ── Attachment collection ────────────────────────────────────────────────────
@@ -141,6 +163,7 @@ def run_prompt_blocking(
     prompt: str,
     *,
     emit_callback: Any = None,
+    run_id: str | None = None,
 ) -> ChatResult:
     """Execute an LLM prompt synchronously (called from Worker thread).
 
@@ -149,7 +172,7 @@ def run_prompt_blocking(
     if state.backend == "codex":
         return _run_codex(state, prompt)
     else:
-        return _run_mtp(state, prompt, emit_callback=emit_callback)
+        return _run_mtp(state, prompt, emit_callback=emit_callback, run_id=run_id)
 
 
 def _run_codex(state: TUIState, prompt: str) -> ChatResult:
@@ -182,11 +205,12 @@ def _run_codex(state: TUIState, prompt: str) -> ChatResult:
         attachments=[],
         warnings=codex_result.warnings,
         usage_lines=codex_result.usage_lines,
+        thinking_text="",
     )
 
 
 def _run_mtp(
-    state: TUIState, prompt: str, *, emit_callback: Any = None,
+    state: TUIState, prompt: str, *, emit_callback: Any = None, run_id: str | None = None,
 ) -> ChatResult:
     """Run prompt through MTP SDK provider backend."""
     from . import tui_mtp_backend as mtp_backend
@@ -214,11 +238,21 @@ def _run_mtp(
         model = entry.get("model") or DEFAULT_PROVIDER_MODELS.get(state.backend, "default")
         api_key = entry.get("api_key")
         base_url = entry.get("base_url")
+        provider_options: dict[str, Any] | None = None
+        if state.backend == "xiaomi":
+            provider_options = {}
+            if entry.get("thinking_mode"):
+                provider_options["thinking_mode"] = entry["thinking_mode"]
+            if entry.get("final_thinking_mode"):
+                provider_options["final_thinking_mode"] = entry["final_thinking_mode"]
+            if not provider_options:
+                provider_options = None
 
         try:
             selection = ProviderSelection(
                 provider_name=state.backend, model_name=model,
                 api_key=api_key, base_url=base_url,
+                provider_options=provider_options,
             )
             provider = build_tui_provider(selection)
             state.agent = build_harness_agent(
@@ -248,6 +282,7 @@ def _run_mtp(
             emit_live=emit_callback,
             provider_name=state.backend,
             model_name=model_name,
+            run_id=run_id,
         )
         return ChatResult(
             text=mtp_result.text,
@@ -255,6 +290,9 @@ def _run_mtp(
             attachments=[],
             warnings=mtp_result.warnings,
             usage_lines=mtp_result.usage_lines,
+            tool_details=mtp_result.tool_details,
+            assistant_blocks=mtp_result.assistant_blocks,
+            thinking_text=mtp_result.thinking_text,
         )
     except Exception as exc:
         return ChatResult(
@@ -304,11 +342,20 @@ def switch_backend(state: TUIState, provider_name: str) -> str:
     model = entry.get("model") or DEFAULT_PROVIDER_MODELS.get(provider_name, "default")
     api_key = entry.get("api_key")
     base_url = entry.get("base_url")
+    provider_options: dict[str, Any] | None = None
+    if provider_name == "xiaomi":
+        provider_options = {}
+        if entry.get("thinking_mode"):
+            provider_options["thinking_mode"] = entry["thinking_mode"]
+        if entry.get("final_thinking_mode"):
+            provider_options["final_thinking_mode"] = entry["final_thinking_mode"]
+        if not provider_options:
+            provider_options = None
 
     try:
         selection = ProviderSelection(
             provider_name=provider_name, model_name=model,
-            api_key=api_key, base_url=base_url,
+            api_key=api_key, base_url=base_url, provider_options=provider_options,
         )
         provider = build_tui_provider(selection)
         state.agent = build_harness_agent(

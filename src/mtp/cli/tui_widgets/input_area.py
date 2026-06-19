@@ -53,8 +53,8 @@ class InputArea(TextArea):
     DEFAULT_CSS = """
     InputArea {
         height: auto;
-        min-height: 3;
-        max-height: 10;
+        min-height: 5;
+        max-height: 14;
         border: tall $accent 40%;
         background: $surface;
         padding: 0 1;
@@ -95,12 +95,23 @@ class InputArea(TextArea):
         )
 
     async def _on_key(self, event: events.Key) -> None:
-        # If the autocomplete suggestion list is visible, hand over navigation focus
-        if event.key in ("down", "up", "tab"):
+        # If the autocomplete suggestion list is visible, let the first arrow/enter
+        # key immediately interact with it instead of forcing a second keypress.
+        if event.key in ("down", "up", "tab", "enter"):
             try:
                 option_list = self.app.query_one("#suggestion-list", OptionList)
                 if option_list.has_class("visible"):
                     option_list.focus()
+                    option_count = len(option_list.options)
+                    if option_count > 0:
+                        if option_list.highlighted is None:
+                            option_list.highlighted = 0 if event.key != "up" else option_count - 1
+                        elif event.key == "down":
+                            option_list.action_cursor_down()
+                        elif event.key == "up":
+                            option_list.action_cursor_up()
+                        elif event.key == "enter":
+                            option_list.action_select()
                     event.prevent_default()
                     event.stop()
                     return
@@ -185,3 +196,4 @@ class InputPanel(Vertical):
         yield Horizontal(id="attachment-container")
         yield PromptLabel(id="prompt-label")
         yield InputArea(id="chat-input")
+        yield Static("  Ctrl+B sidebar   Ctrl+P commands   Ctrl+Y copy   Esc interrupt/hide", id="input-hints")

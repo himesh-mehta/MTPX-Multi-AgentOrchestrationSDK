@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import types
 from dataclasses import dataclass
-from typing import Any, Callable, get_args, get_origin
+from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 from .protocol import ToolRiskLevel, ToolSpec
 from .runtime import RegisteredTool, ToolkitLoader
@@ -58,10 +59,28 @@ def mtp_tool(
 def _annotation_to_json_schema(annotation: Any) -> dict[str, Any]:
     if annotation is inspect._empty:
         return {"type": "string"}
+    if annotation is Any:
+        return {}
+    if annotation is None or annotation is type(None):
+        return {"type": "null"}
 
     origin = get_origin(annotation)
     args = get_args(annotation)
 
+    if origin is Literal:
+        return {"enum": list(args)}
+    if origin in {Union, types.UnionType}:
+        schemas = [_annotation_to_json_schema(arg) for arg in args]
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for schema in schemas:
+            key = repr(sorted(schema.items()))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(schema)
+        if len(deduped) == 1:
+            return deduped[0]
+        return {"anyOf": deduped}
     if annotation in {str}:
         return {"type": "string"}
     if annotation in {int}:
@@ -90,6 +109,10 @@ def _annotation_to_json_schema(annotation: Any) -> dict[str, Any]:
 
 def _infer_input_schema(fn: Callable[..., Any]) -> dict[str, Any]:
     signature = inspect.signature(fn)
+    try:
+        type_hints = get_type_hints(fn)
+    except Exception:
+        type_hints = {}
     properties: dict[str, Any] = {}
     required: list[str] = []
 
@@ -98,7 +121,8 @@ def _infer_input_schema(fn: Callable[..., Any]) -> dict[str, Any]:
             continue
         if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
             continue
-        properties[name] = _annotation_to_json_schema(param.annotation)
+        annotation = type_hints.get(name, param.annotation)
+        properties[name] = _annotation_to_json_schema(annotation)
         if param.default is inspect._empty:
             required.append(name)
 

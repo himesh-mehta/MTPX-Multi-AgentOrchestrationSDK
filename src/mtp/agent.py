@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from itertools import count
 from datetime import UTC, datetime
 import json
 import re
@@ -88,7 +89,6 @@ class ProviderAdapter(Protocol):
 _AGENT_MODES = {"standalone", "member", "delegator", "orchestration"}
 _ORCHESTRATOR_MODES = {"delegator", "orchestration"}
 _AUTORESEARCH_TERMINATION_PREFIX = "__mtp_autoresearch_terminate__:"
-_AUTORESEARCH_DEFAULT_MAX_ROUNDS = 100
 
 
 class Agent:
@@ -102,7 +102,7 @@ class Agent:
         tools: ToolRegistry | None = None,
         debug_mode: bool = False,
         debug_logger: Callable[[str], None] | None = None,
-        debug_max_chars: int = 600,
+        debug_max_chars: int | None = None,
         strict_dependency_mode: bool = False,
         instructions: str | None = None,
         system_instructions: str | None = None,
@@ -337,11 +337,12 @@ class Agent:
         return {"reason": reason, "summary": summary}
 
     def _resolve_max_rounds(self, max_rounds: int) -> int:
-        if not self.autoresearch:
-            return max_rounds
-        if max_rounds == 5:
-            return _AUTORESEARCH_DEFAULT_MAX_ROUNDS
         return max_rounds
+
+    def _round_indices(self, max_rounds: int) -> Iterator[int]:
+        if self.autoresearch:
+            return count(1)
+        return iter(range(1, max_rounds + 1))
 
     def _build_member_tool(self, member_name: str, member: "Agent") -> RegisteredTool:
         async def delegate_to_member(
@@ -442,6 +443,8 @@ class Agent:
                 text = json.dumps(value, default=str)
         except Exception:
             text = repr(value)
+        if self.debug_max_chars is None or self.debug_max_chars <= 0:
+            return text
         if len(text) <= self.debug_max_chars:
             return text
         return text[: self.debug_max_chars] + "...<truncated>"
@@ -552,6 +555,65 @@ class Agent:
         content = assistant_tool_message.get("content")
         if isinstance(content, str) and content.strip():
             return content.strip()
+        return None
+
+    def _plan_event_payload(self, round_idx: int, action_metadata: dict[str, Any], plan: ExecutionPlan) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "type": "plan_received",
+            "round": round_idx,
+            "batches": [
+                {
+                    "mode": batch.mode,
+                    "calls": [call.name for call in batch.calls],
+                    "call_ids": [call.id for call in batch.calls],
+                }
+                for batch in plan.batches
+            ],
+        }
+        for key in ("tool_call_source", "raw_tool_call_count", "derived_batch_count", "derived_batch_modes"):
+            value = action_metadata.get(key)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+    def _debug_plan_summary(self, action_metadata: dict[str, Any], plan: ExecutionPlan) -> None:
+        call_count = sum(len(batch.calls) for batch in plan.batches)
+        summary = f"plan_received batches={len(plan.batches)} calls={call_count}"
+        tool_call_source = action_metadata.get("tool_call_source")
+        if isinstance(tool_call_source, str) and tool_call_source:
+            summary += f" source={tool_call_source}"
+        raw_tool_call_count = action_metadata.get("raw_tool_call_count")
+        if isinstance(raw_tool_call_count, int):
+            summary += f" raw_calls={raw_tool_call_count}"
+        derived_batch_count = action_metadata.get("derived_batch_count")
+        if isinstance(derived_batch_count, int):
+            summary += f" derived_batches={derived_batch_count}"
+        derived_batch_modes = action_metadata.get("derived_batch_modes")
+        if isinstance(derived_batch_modes, list) and derived_batch_modes:
+            summary += f" modes={derived_batch_modes}"
+        self._debug(summary)
+        for batch_idx, batch in enumerate(plan.batches, start=1):
+            call_names = [call.name for call in batch.calls]
+            self._debug(f"batch#{batch_idx} mode={batch.mode} calls={call_names}")
+
+    def _assistant_message_for_action(self, action: AgentAction) -> dict[str, Any]:
+        metadata = action.metadata if isinstance(action.metadata, dict) else {}
+        assistant_message = metadata.get("assistant_message")
+        if isinstance(assistant_message, dict):
+            return assistant_message
+        return {"role": "assistant", "content": action.response_text or ""}
+
+    def _finalize_assistant_message(self, final_text: str) -> dict[str, Any]:
+        assistant_message = getattr(self.provider, "_last_finalize_message", None)
+        if isinstance(assistant_message, dict):
+            return assistant_message
+        return {"role": "assistant", "content": final_text}
+
+    def _finalize_reasoning_text(self) -> str | None:
+        for attr_name in ("_last_stream_reasoning", "_last_finalize_reasoning"):
+            value = getattr(self.provider, attr_name, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
         return None
 
     def _trim_cacheable_repeated_tool_calls(
@@ -1002,7 +1064,7 @@ class Agent:
         total_tool_calls = 0
         paused = False
 
-        for round_idx in range(1, max_rounds + 1):
+        for round_idx in self._round_indices(max_rounds):
             if self._is_cancelled(run_id):
                 cancelled = True
                 break
@@ -1028,7 +1090,7 @@ class Agent:
             if action.response_text and action.plan is None:
                 self._debug("provider returned direct response (no tool plan)")
                 self._debug(f"assistant_response={self._short(action.response_text)}")
-                self._append_message({"role": "assistant", "content": action.response_text})
+                self._append_message(self._assistant_message_for_action(action))
                 if self.autoresearch:
                     self._debug("autoresearch mode active; continuing after direct response")
                     continue
@@ -1051,10 +1113,8 @@ class Agent:
                 )
                 break
             total_tool_calls += call_count
-            self._debug(f"plan_received batches={len(action.plan.batches)} calls={call_count}")
-            for batch_idx, batch in enumerate(action.plan.batches, start=1):
-                call_names = [call.name for call in batch.calls]
-                self._debug(f"batch#{batch_idx} mode={batch.mode} calls={call_names}")
+            action_metadata = action.metadata if isinstance(action.metadata, dict) else {}
+            self._debug_plan_summary(action_metadata, action.plan)
 
             if self.strict_dependency_mode:
                 violations = validate_strict_dependencies(action.plan)
@@ -1077,7 +1137,7 @@ class Agent:
                     )
                     continue
 
-            assistant_tool_message = action.metadata.get("assistant_tool_message")
+            assistant_tool_message = action_metadata.get("assistant_tool_message")
             if isinstance(assistant_tool_message, dict):
                 self._debug("assistant tool-call message appended")
                 self._debug(f"assistant_tool_message={self._short(assistant_tool_message)}")
@@ -1205,7 +1265,7 @@ class Agent:
             else:
                 self._debug("calling provider.finalize")
                 final_text = self.provider.finalize(self.messages, last_results)
-                self._append_message({"role": "assistant", "content": final_text})
+                self._append_message(self._finalize_assistant_message(final_text))
                 self._debug(f"final response generated text={self._short(final_text)}")
 
             final_text, refine_error = self._refine_output(
@@ -1396,14 +1456,14 @@ class Agent:
         total_tool_calls = 0
         paused = False
 
-        for _round_idx in range(1, max_rounds + 1):
+        for _round_idx in self._round_indices(max_rounds):
             if self._is_cancelled(run_id):
                 cancelled = True
                 break
             action = await self._anext_action(planning_tools)
             self._normalize_plan_reasoning(action.plan, tools)
             if action.response_text and action.plan is None:
-                self._append_message({"role": "assistant", "content": action.response_text})
+                self._append_message(self._assistant_message_for_action(action))
                 if self.autoresearch:
                     continue
                 return last_results, action.response_text, cancelled, total_tool_calls, paused, None
@@ -1422,6 +1482,8 @@ class Agent:
                 )
                 break
             total_tool_calls += call_count
+            action_metadata = action.metadata if isinstance(action.metadata, dict) else {}
+            self._debug_plan_summary(action_metadata, action.plan)
 
             if self.strict_dependency_mode:
                 violations = validate_strict_dependencies(action.plan)
@@ -1438,7 +1500,7 @@ class Agent:
                     )
                     continue
 
-            assistant_tool_message = action.metadata.get("assistant_tool_message")
+            assistant_tool_message = action_metadata.get("assistant_tool_message")
             if isinstance(assistant_tool_message, dict):
                 self._append_message(assistant_tool_message)
 
@@ -1550,7 +1612,7 @@ class Agent:
                 final_text = direct_response
             else:
                 final_text = await self._afinalize(last_results)
-                self._append_message({"role": "assistant", "content": final_text})
+                self._append_message(self._finalize_assistant_message(final_text))
 
             final_text, refine_error = await self._arefine_output(
                 final_text,
@@ -1753,7 +1815,7 @@ class Agent:
             finalize_stream = getattr(self.provider, "finalize_stream", None)
             if not callable(finalize_stream):
                 final_text = self.provider.finalize(self.messages, last_results)
-                self._append_message({"role": "assistant", "content": final_text})
+                self._append_message(self._finalize_assistant_message(final_text))
                 self._debug(f"final response generated text={self._short(final_text)}")
                 yield final_text
                 return
@@ -1769,7 +1831,7 @@ class Agent:
                     chunks.append(chunk)
                     yield chunk
             final_text = "".join(chunks)
-            self._append_message({"role": "assistant", "content": final_text})
+            self._append_message(self._finalize_assistant_message(final_text))
             self._debug(f"final streamed response generated text={self._short(final_text)}")
         finally:
             self._complete_run(resolved_run_id)
@@ -1864,7 +1926,7 @@ class Agent:
         current_round = 0
         seen_cacheable_tool_calls: set[tuple[str, str]] = set()
         try:
-            for round_idx in range(1, max_rounds + 1):
+            for round_idx in self._round_indices(max_rounds):
                 current_round = round_idx
                 if self._is_cancelled(resolved_run_id):
                     yield events.emit("run_cancelled", round=round_idx)
@@ -1905,7 +1967,7 @@ class Agent:
                 )
 
                 if action.response_text and action.plan is None:
-                    self._append_message({"role": "assistant", "content": action.response_text})
+                    self._append_message(self._assistant_message_for_action(action))
                     if self.autoresearch:
                         if stream_final and not chunks_streamed:
                             for chunk in self._chunk_text(action.response_text):
@@ -1939,18 +2001,8 @@ class Agent:
                     break
                 total_tool_calls += round_call_count
 
-                yield events.emit(
-                    "plan_received",
-                    round=round_idx,
-                    batches=[
-                        {
-                            "mode": batch.mode,
-                            "calls": [call.name for call in batch.calls],
-                            "call_ids": [call.id for call in batch.calls],
-                        }
-                        for batch in action.plan.batches
-                    ],
-                )
+                plan_payload = self._plan_event_payload(round_idx, action_metadata, action.plan)
+                yield events.emit(plan_payload.pop("type"), **plan_payload)
 
                 if self.strict_dependency_mode:
                     violations = validate_strict_dependencies(action.plan)
@@ -1998,7 +2050,7 @@ class Agent:
                     )
                     continue
 
-                assistant_tool_message = action.metadata.get("assistant_tool_message")
+                assistant_tool_message = action_metadata.get("assistant_tool_message")
                 if isinstance(assistant_tool_message, dict):
                     self._append_message(assistant_tool_message)
                     if emit_tool_events:
@@ -2128,6 +2180,7 @@ class Agent:
             finalize_rate_limits = getattr(self.provider, "_last_stream_rate_limits", None)
             if not isinstance(finalize_rate_limits, dict):
                 finalize_rate_limits = getattr(self.provider, "_last_finalize_rate_limits", None)
+            finalize_reasoning = self._finalize_reasoning_text()
             model_name = getattr(self.provider, "model", None) or getattr(self.provider, "model_name", None)
             yield events.emit(
                 "llm_response",
@@ -2137,11 +2190,12 @@ class Agent:
                 model=model_name,
                 usage=finalize_usage if isinstance(finalize_usage, dict) else None,
                 rate_limits=finalize_rate_limits if isinstance(finalize_rate_limits, dict) else None,
+                reasoning=finalize_reasoning,
                 duration_seconds=finalize_duration,
                 has_plan=False,
                 has_response=True,
             )
-            self._append_message({"role": "assistant", "content": final_text})
+            self._append_message(self._finalize_assistant_message(final_text))
             yield events.emit("run_completed", final_text=final_text, rounds=max_rounds, total_tool_calls=total_tool_calls)
         except Exception as exc:  # noqa: BLE001
             yield events.emit(
@@ -2244,7 +2298,7 @@ class Agent:
         current_round = 0
         seen_cacheable_tool_calls: set[tuple[str, str]] = set()
         try:
-            for round_idx in range(1, max_rounds + 1):
+            for round_idx in self._round_indices(max_rounds):
                 current_round = round_idx
                 if self._is_cancelled(resolved_run_id):
                     yield events.emit("run_cancelled", round=round_idx)
@@ -2285,7 +2339,7 @@ class Agent:
                 )
 
                 if action.response_text and action.plan is None:
-                    self._append_message({"role": "assistant", "content": action.response_text})
+                    self._append_message(self._assistant_message_for_action(action))
                     if self.autoresearch:
                         if stream_final and not chunks_streamed:
                             for chunk in self._chunk_text(action.response_text):
@@ -2319,18 +2373,8 @@ class Agent:
                     break
                 total_tool_calls += round_call_count
 
-                yield events.emit(
-                    "plan_received",
-                    round=round_idx,
-                    batches=[
-                        {
-                            "mode": batch.mode,
-                            "calls": [call.name for call in batch.calls],
-                            "call_ids": [call.id for call in batch.calls],
-                        }
-                        for batch in action.plan.batches
-                    ],
-                )
+                plan_payload = self._plan_event_payload(round_idx, action_metadata, action.plan)
+                yield events.emit(plan_payload.pop("type"), **plan_payload)
 
                 if self.strict_dependency_mode:
                     violations = validate_strict_dependencies(action.plan)
@@ -2378,7 +2422,7 @@ class Agent:
                     )
                     continue
 
-                assistant_tool_message = action.metadata.get("assistant_tool_message")
+                assistant_tool_message = action_metadata.get("assistant_tool_message")
                 if isinstance(assistant_tool_message, dict):
                     self._append_message(assistant_tool_message)
                     if emit_tool_events:
@@ -2507,6 +2551,7 @@ class Agent:
             finalize_rate_limits = getattr(self.provider, "_last_stream_rate_limits", None)
             if not isinstance(finalize_rate_limits, dict):
                 finalize_rate_limits = getattr(self.provider, "_last_finalize_rate_limits", None)
+            finalize_reasoning = self._finalize_reasoning_text()
             model_name = getattr(self.provider, "model", None) or getattr(self.provider, "model_name", None)
             yield events.emit(
                 "llm_response",
@@ -2516,11 +2561,12 @@ class Agent:
                 model=model_name,
                 usage=finalize_usage if isinstance(finalize_usage, dict) else None,
                 rate_limits=finalize_rate_limits if isinstance(finalize_rate_limits, dict) else None,
+                reasoning=finalize_reasoning,
                 duration_seconds=finalize_duration,
                 has_plan=False,
                 has_response=True,
             )
-            self._append_message({"role": "assistant", "content": final_text})
+            self._append_message(self._finalize_assistant_message(final_text))
             yield events.emit("run_completed", final_text=final_text, rounds=max_rounds, total_tool_calls=total_tool_calls)
         except Exception as exc:  # noqa: BLE001
             yield events.emit(

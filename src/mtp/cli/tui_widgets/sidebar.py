@@ -1,17 +1,12 @@
-"""Sidebar Widget — Toggleable workspace context panel.
-
-Shows session info, recent tool events, and workspace file tree.
-Can be shown/hidden with Ctrl+B.
-"""
+"""Sidebar Widget — Toggleable workspace context panel."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
 from textual.widgets import Static, Tree
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.app import ComposeResult
-from textual.reactive import reactive
 from rich.text import Text
 
 
@@ -50,8 +45,8 @@ class WorkspaceTree(Tree):
                     self.root.add(f"📄 {entry.name}{suffix}", allow_expand=False)
         except PermissionError:
             self.root.add("⚠ Permission denied", allow_expand=False)
-        except Exception as e:
-            self.root.add(f"⚠ {e}", allow_expand=False)
+        except Exception as exc:
+            self.root.add(f"⚠ {exc}", allow_expand=False)
 
     def refresh_tree(self, cwd: Path) -> None:
         self._cwd = cwd
@@ -60,8 +55,6 @@ class WorkspaceTree(Tree):
 
 
 class SessionInfo(Static):
-    """Displays current session details."""
-
     DEFAULT_CSS = """
     SessionInfo {
         padding: 1 1;
@@ -78,36 +71,56 @@ class SessionInfo(Static):
         model: str = "",
         turn_count: int = 0,
         mode: str = "",
+        thinking_label: str | None = None,
+        thinking_value: str | None = None,
     ) -> None:
         info = Text()
         info.append("  Session\n", style="bold #c084fc")
 
         sid_short = session_id.split("-")[-1][:8] if session_id else "—"
-        info.append(f"  ID      ", style="dim #71717a")
+        info.append("  ID      ", style="dim #71717a")
         info.append(f"{sid_short}\n", style="#2dd4bf")
-
         if label:
-            info.append(f"  Label   ", style="dim #71717a")
-            info.append(f"{label}\n", style="#f4f4f6")
-
-        info.append(f"  Backend ", style="dim #71717a")
+            info.append("  Label   ", style="dim #71717a")
+            info.append(f"{label[:22]}\n", style="#f4f4f6")
+        info.append("  Backend ", style="dim #71717a")
         info.append(f"{backend}\n", style="#34d399")
-
-        info.append(f"  Model   ", style="dim #71717a")
+        info.append("  Model   ", style="dim #71717a")
         info.append(f"{model}\n", style="#fbbf24")
-
-        info.append(f"  Mode    ", style="dim #71717a")
+        info.append("  Mode    ", style="dim #71717a")
         info.append(f"{mode}\n", style="#818cf8")
-
-        info.append(f"  Turns   ", style="dim #71717a")
+        if thinking_label and thinking_value:
+            info.append(f"  {thinking_label.title():<8}", style="dim #71717a")
+            info.append(f"{thinking_value}\n", style="#d8b4fe")
+        info.append("  Turns   ", style="dim #71717a")
         info.append(f"{turn_count}\n", style="#2dd4bf")
-
         self.update(info)
 
 
-class ToolEventLog(Static):
-    """Shows recent tool events from the last turn."""
+class RunMetrics(Static):
+    DEFAULT_CSS = """
+    RunMetrics {
+        padding: 1 1;
+        height: auto;
+    }
+    """
 
+    def update_metrics(self, lines: list[str]) -> None:
+        text = Text()
+        text.append("  Run Metrics\n", style="bold #f472b6")
+        if not lines:
+            text.append("  No metrics yet", style="dim #71717a")
+            self.update(text)
+            return
+        for raw in lines:
+            key, _, value = raw.partition("=")
+            label = key.replace("_", " ")
+            text.append(f"  {label:<16}", style="dim #71717a")
+            text.append(f"{value}\n", style="#93c5fd")
+        self.update(text)
+
+
+class ToolEventLog(Static):
     DEFAULT_CSS = """
     ToolEventLog {
         padding: 1 1;
@@ -117,27 +130,47 @@ class ToolEventLog(Static):
     """
 
     def update_events(self, events: list[str]) -> None:
-        if not events:
-            text = Text("  No tool events yet", style="dim #71717a")
-            self.update(text)
-            return
-
         text = Text()
         text.append("  Recent Tools\n", style="bold #a78bfa")
-        for i, event in enumerate(events[-8:]):
-            connector = "└─" if i == len(events[-8:]) - 1 else "├─"
+        if not events:
+            text.append("  No tool events yet", style="dim #71717a")
+            self.update(text)
+            return
+        for index, event in enumerate(events[-8:]):
+            connector = "└─" if index == len(events[-8:]) - 1 else "├─"
             clean = event.replace("🔧 ", "")
             text.append(f"  {connector} ", style="dim #3f3f46")
-            text.append(f"{clean[:50]}\n", style="#2dd4bf")
+            text.append(f"{clean[:70]}\n", style="#2dd4bf")
+        self.update(text)
+
+
+class ShortcutHints(Static):
+    DEFAULT_CSS = """
+    ShortcutHints {
+        padding: 1 1;
+        height: auto;
+    }
+    """
+
+    def update_hints(self) -> None:
+        text = Text()
+        text.append("  Shortcuts\n", style="bold #38bdf8")
+        rows = [
+            ("Ctrl+B", "Sidebar"),
+            ("Ctrl+P", "Commands"),
+            ("Ctrl+Y", "Copy output"),
+            ("Esc", "Interrupt / hide"),
+        ]
+        for key, label in rows:
+            text.append(f"  {key:<8}", style="#818cf8")
+            text.append(f"{label}\n", style="#f4f4f6")
         self.update(text)
 
 
 class Sidebar(VerticalScroll):
-    """Toggleable right sidebar for workspace context."""
-
     DEFAULT_CSS = """
     Sidebar {
-        width: 35;
+        width: 37;
         dock: right;
         background: #0c0c0e;
         border-left: tall #27272a;
@@ -154,9 +187,14 @@ class Sidebar(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield SessionInfo(id="session-info")
         yield Static("  ─────────", classes="separator")
+        yield RunMetrics(id="run-metrics")
+        yield Static("  ─────────", classes="separator")
         yield ToolEventLog(id="tool-event-log")
         yield Static("  ─────────", classes="separator")
+        yield ShortcutHints(id="shortcut-hints")
+        yield Static("  ─────────", classes="separator")
         yield Static("  Workspace", classes="section-header")
+        yield WorkspaceTree(Path.cwd(), id="workspace-tree")
 
     def toggle(self) -> None:
         self.toggle_class("visible")

@@ -10,7 +10,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from ..media import Audio, File, Image, Video
-from ..protocol import ToolBatch, ToolCall
+from ..protocol import ToolBatch, ToolCall, ToolSpec
 
 USAGE_METRICS_NONE = "none"
 USAGE_METRICS_BASIC = "basic"
@@ -226,29 +226,45 @@ def extract_refs(value: Any) -> list[str]:
     return refs
 
 
+def _normalize_ref_value(ref_value: Any, id_by_index: dict[int, str], current_idx: int | None) -> Any:
+    known_ids = set(id_by_index.values())
+    if isinstance(ref_value, str) and ref_value in known_ids:
+        return ref_value
+    if isinstance(ref_value, int):
+        return id_by_index.get(ref_value, ref_value)
+    if not isinstance(ref_value, str):
+        return ref_value
+
+    stripped = ref_value.strip()
+    if stripped in known_ids:
+        return stripped
+    if stripped.isdigit():
+        return id_by_index.get(int(stripped), stripped)
+
+    lowered = stripped.lower()
+    if lowered in ("result", "last", "last_call", "prev", "previous"):
+        target_idx = current_idx - 1 if current_idx is not None else 0
+        return id_by_index.get(max(0, target_idx), stripped)
+
+    call_match = re.fullmatch(r"call_(\d+)", lowered)
+    if call_match:
+        return id_by_index.get(int(call_match.group(1)), stripped)
+
+    c_match = re.fullmatch(r"c(\d+)", lowered)
+    if c_match:
+        one_based_idx = int(c_match.group(1)) - 1
+        if one_based_idx >= 0:
+            return id_by_index.get(one_based_idx, stripped)
+
+    return stripped
+
+
 def normalize_refs(value: Any, id_by_index: dict[int, str], current_idx: int | None = None) -> Any:
     if isinstance(value, dict):
         normalized: dict[str, Any] = {}
         for key, item in value.items():
             if key == "$ref":
-                if isinstance(item, int) and item in id_by_index:
-                    normalized[key] = id_by_index[item]
-                elif isinstance(item, str) and item.isdigit():
-                    idx = int(item)
-                    normalized[key] = id_by_index.get(idx, item)
-                elif isinstance(item, str):
-                    match = re.search(r"(\d+)$", item)
-                    if match:
-                        idx = int(match.group(1))
-                        normalized[key] = id_by_index.get(idx, item)
-                    elif item.lower() in ("result", "last", "last_call", "prev", "previous"):
-                        # Map to previous call if available
-                        target_idx = current_idx - 1 if current_idx is not None else 0
-                        normalized[key] = id_by_index.get(max(0, target_idx), item)
-                    else:
-                        normalized[key] = item
-                else:
-                    normalized[key] = item
+                normalized[key] = _normalize_ref_value(item, id_by_index, current_idx)
             else:
                 normalized[key] = normalize_refs(item, id_by_index, current_idx)
         return normalized
@@ -257,8 +273,10 @@ def normalize_refs(value: Any, id_by_index: dict[int, str], current_idx: int | N
     return value
 
 
-def safe_load_arguments(raw_args: str | None) -> dict[str, Any]:
-    raw = raw_args or "{}"
+def safe_load_arguments(raw_args: Any) -> dict[str, Any]:
+    if isinstance(raw_args, dict):
+        return raw_args
+    raw = raw_args if isinstance(raw_args, str) and raw_args else "{}"
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:

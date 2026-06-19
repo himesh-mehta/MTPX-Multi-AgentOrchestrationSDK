@@ -2,7 +2,7 @@
 
 Direction alignment:
 - Roadmap items should be evaluated against the protocol-vs-SDK boundaries in
-  [Project Direction](/c:/Users/prajw/Downloads/MTP/docs/PROJECT_DIRECTION.md).
+  [Project Direction](PROJECT_DIRECTION.md).
 
 ## Current implementation snapshot (2026-04-06)
 

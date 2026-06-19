@@ -17,6 +17,8 @@ const PROVIDERS = [
   { name: "Ollama",      logo: "🦙", extra: "mtpx[ollama]",      model: "local models",                    color: "#84cc16" },
   { name: "LM Studio",   logo: "🖥",  extra: "mtpx[lmstudio]",   model: "local models",                    color: "#a78bfa" },
   { name: "SambaNova",   logo: "🚀", extra: "built-in",          model: "Meta-Llama-3.1-70B",              color: "#f59e0b" },
+  { name: "Cerebras",    logo: "🧊", extra: "built-in",          model: "llama3.1-8b",                     color: "#0ea5e9" },
+  { name: "Xiaomi",      logo: "📱", extra: "built-in",          model: "MiLM-7B",                         color: "#ff6900" },
 ];
 
 export function ProvidersSection() {
@@ -28,7 +30,7 @@ export function ProvidersSection() {
         <p className="text-xs uppercase tracking-[0.2em] text-[#facc15] font-semibold mb-4">Universal Provider Support</p>
         <h2 className="text-3xl md:text-4xl font-bold tracking-tight mb-4">One SDK. Every provider.</h2>
         <p className="text-white/50 max-w-xl mx-auto text-sm leading-relaxed">
-          Swap between 13+ foundation model providers without changing your agent code. Each adapter implements the same interface — deterministic, testable, interchangeable.
+          Swap between 16 foundation model providers without changing your agent code. Each adapter implements the same interface — deterministic, testable, interchangeable.
         </p>
       </motion.div>
 

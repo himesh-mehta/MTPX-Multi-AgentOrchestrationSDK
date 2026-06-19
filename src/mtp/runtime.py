@@ -12,7 +12,12 @@ from .exceptions import RetryAgentRun, StopAgentRun
 from .media import coerce_audios, coerce_files, coerce_images, coerce_videos
 from .policy import PolicyDecision, RiskPolicy
 from .protocol import ExecutionPlan, ToolCall, ToolOutput, ToolResult, ToolSpec
-from .schema import ToolArgumentsValidationError, validate_execution_plan, validate_tool_arguments
+from .schema import (
+    ToolArgumentsValidationError,
+    coerce_tool_arguments,
+    validate_execution_plan,
+    validate_tool_arguments,
+)
 
 ToolHandler = Callable[..., Any] | Callable[..., Awaitable[Any]]
 ApprovalHandler = Callable[[ToolSpec, ToolCall, dict[str, Any]], bool | Awaitable[bool]]
@@ -292,7 +297,21 @@ class ToolRegistry:
                 error=f"Unknown tool: {call.name}",
             )
 
-        resolved_args = self._resolve_refs(call.arguments, prior_results)
+        resolved_args = call.arguments
+        if isinstance(resolved_args, dict):
+            resolved_args = coerce_tool_arguments(resolved_args, tool.spec.input_schema)
+        try:
+            resolved_args = self._resolve_refs(resolved_args, prior_results)
+        except KeyError as exc:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.name,
+                output=None,
+                success=False,
+                error=str(exc),
+            )
+        if isinstance(resolved_args, dict):
+            resolved_args = coerce_tool_arguments(resolved_args, tool.spec.input_schema)
         try:
             validate_tool_arguments(resolved_args, tool.spec.input_schema)
         except ToolArgumentsValidationError as exc:

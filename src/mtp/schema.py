@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 from typing import Any
 
 from .protocol import ExecutionPlan
@@ -68,6 +69,49 @@ class ToolArgumentsValidationError(ValueError):
     pass
 
 
+def _coerce_scalar(expected: str, value: Any) -> Any:
+    if expected == "integer":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if re.fullmatch(r"[+-]?\d+", stripped):
+                try:
+                    return int(stripped)
+                except Exception:
+                    return value
+        return value
+    if expected == "number":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", stripped):
+                try:
+                    number = float(stripped)
+                except Exception:
+                    return value
+                return int(number) if number.is_integer() else number
+        return value
+    if expected == "boolean" and isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        return value
+    if expected == "null" and isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"null", "none"}:
+            return None
+        return value
+    return value
+
+
 def _validate_schema_type(expected: str, value: Any) -> bool:
     if expected == "object":
         return isinstance(value, dict)
@@ -86,7 +130,93 @@ def _validate_schema_type(expected: str, value: Any) -> bool:
     return True
 
 
-def _validate_value(value: Any, schema: dict[str, Any], path: str) -> None:
+def _collect_refs(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, dict):
+        if "$ref" in value and isinstance(value["$ref"], str):
+            refs.append(value["$ref"])
+        for item in value.values():
+            refs.extend(_collect_refs(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.extend(_collect_refs(item))
+    return refs
+
+
+def _resolve_schema_ref(ref: str, root_schema: dict[str, Any]) -> dict[str, Any] | None:
+    if not ref.startswith("#/"):
+        return None
+    current: Any = root_schema
+    for part in ref[2:].split("/"):
+        key = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current if isinstance(current, dict) else None
+
+
+def _validate_combinator(
+    value: Any,
+    branches: Any,
+    path: str,
+    root_schema: dict[str, Any],
+    *,
+    keyword: str,
+) -> None:
+    if not isinstance(branches, list) or not branches:
+        return
+    matches = 0
+    errors: list[str] = []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        try:
+            _validate_value(value, branch, path, root_schema)
+            matches += 1
+        except ToolArgumentsValidationError as exc:
+            errors.append(str(exc))
+    if keyword == "anyOf" and matches < 1:
+        joined = "; ".join(errors) if errors else "no anyOf branch matched"
+        raise ToolArgumentsValidationError(f"{path}: {joined}")
+    if keyword == "oneOf" and matches != 1:
+        raise ToolArgumentsValidationError(f"{path}: expected exactly one oneOf match, got {matches}")
+
+
+def _validate_value(value: Any, schema: dict[str, Any], path: str, root_schema: dict[str, Any]) -> None:
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(ref, root_schema)
+        if resolved is None:
+            raise ToolArgumentsValidationError(f"{path}: unresolved schema ref {ref}")
+        _validate_value(value, resolved, path, root_schema)
+        return
+
+    const = schema.get("const")
+    if "const" in schema and value != const:
+        raise ToolArgumentsValidationError(f"{path}: expected const {const!r}")
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        raise ToolArgumentsValidationError(f"{path}: expected one of {enum!r}")
+
+    _validate_combinator(value, schema.get("anyOf"), path, root_schema, keyword="anyOf")
+    _validate_combinator(value, schema.get("oneOf"), path, root_schema, keyword="oneOf")
+
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for branch in all_of:
+            if isinstance(branch, dict):
+                _validate_value(value, branch, path, root_schema)
+
+    not_schema = schema.get("not")
+    if isinstance(not_schema, dict):
+        try:
+            _validate_value(value, not_schema, path, root_schema)
+        except ToolArgumentsValidationError:
+            pass
+        else:
+            raise ToolArgumentsValidationError(f"{path}: value matches disallowed schema")
+
     any_of = schema.get("anyOf")
     if isinstance(any_of, list) and any_of:
         errors: list[str] = []
@@ -94,7 +224,7 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str) -> None:
             if not isinstance(option, dict):
                 continue
             try:
-                _validate_value(value, option, path)
+                _validate_value(value, option, path, root_schema)
                 return
             except ToolArgumentsValidationError as exc:
                 errors.append(str(exc))
@@ -102,13 +232,17 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str) -> None:
         raise ToolArgumentsValidationError(f"{path}: {joined}")
 
     expected_type = schema.get("type")
-    if isinstance(expected_type, str) and not _validate_schema_type(expected_type, value):
+    if isinstance(expected_type, list):
+        if not any(isinstance(item, str) and _validate_schema_type(item, value) for item in expected_type):
+            actual = type(value).__name__
+            raise ToolArgumentsValidationError(f"{path}: expected one of {expected_type}, got {actual}")
+    elif isinstance(expected_type, str) and not _validate_schema_type(expected_type, value):
         actual = type(value).__name__
         raise ToolArgumentsValidationError(
             f"{path}: expected {expected_type}, got {actual}"
         )
 
-    if expected_type == "object" and isinstance(value, dict):
+    if (expected_type == "object" or (isinstance(expected_type, list) and "object" in expected_type)) and isinstance(value, dict):
         properties = schema.get("properties")
         if not isinstance(properties, dict):
             properties = {}
@@ -128,20 +262,135 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str) -> None:
         for key, child_value in value.items():
             child_schema = properties.get(key)
             if isinstance(child_schema, dict):
-                _validate_value(child_value, child_schema, f"{path}.{key}")
+                _validate_value(child_value, child_schema, f"{path}.{key}", root_schema)
         return
 
-    if expected_type == "array" and isinstance(value, list):
+    if (expected_type == "array" or (isinstance(expected_type, list) and "array" in expected_type)) and isinstance(value, list):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            raise ToolArgumentsValidationError(f"{path}: expected at least {min_items} items")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            raise ToolArgumentsValidationError(f"{path}: expected at most {max_items} items")
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for idx, item in enumerate(value):
-                _validate_value(item, item_schema, f"{path}[{idx}]")
+                _validate_value(item, item_schema, f"{path}[{idx}]", root_schema)
+        return
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            raise ToolArgumentsValidationError(f"{path}: expected >= {minimum}")
+        maximum = schema.get("maximum")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            raise ToolArgumentsValidationError(f"{path}: expected <= {maximum}")
+
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            raise ToolArgumentsValidationError(f"{path}: expected length >= {min_length}")
+        max_length = schema.get("maxLength")
+        if isinstance(max_length, int) and len(value) > max_length:
+            raise ToolArgumentsValidationError(f"{path}: expected length <= {max_length}")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            raise ToolArgumentsValidationError(f"{path}: does not match pattern {pattern!r}")
+
+
+def _coerce_value(value: Any, schema: dict[str, Any], root_schema: dict[str, Any]) -> Any:
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(ref, root_schema)
+        if resolved is not None:
+            return _coerce_value(value, resolved, root_schema)
+        return value
+
+    combinators = []
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        combinators.append(any_of)
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        combinators.append(one_of)
+    for branches in combinators:
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            candidate = _coerce_value(value, branch, root_schema)
+            try:
+                _validate_value(candidate, branch, "$", root_schema)
+                return candidate
+            except ToolArgumentsValidationError:
+                continue
+
+    expected_type = schema.get("type")
+    if isinstance(expected_type, list):
+        for item in expected_type:
+            if not isinstance(item, str):
+                continue
+            candidate = _coerce_value(value, {"type": item}, root_schema)
+            if _validate_schema_type(item, candidate):
+                return candidate
+        return value
+
+    if expected_type == "object":
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    parsed = value
+                else:
+                    value = parsed
+        if isinstance(value, dict):
+            properties = schema.get("properties")
+            if not isinstance(properties, dict):
+                return value
+            coerced: dict[str, Any] = {}
+            for key, item in value.items():
+                child_schema = properties.get(key)
+                if isinstance(child_schema, dict):
+                    coerced[key] = _coerce_value(item, child_schema, root_schema)
+                else:
+                    coerced[key] = item
+            return coerced
+        return value
+
+    if expected_type == "array":
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    parsed = value
+                else:
+                    value = parsed
+        if isinstance(value, list):
+            item_schema = schema.get("items")
+            if not isinstance(item_schema, dict):
+                return value
+            return [_coerce_value(item, item_schema, root_schema) for item in value]
+        return value
+
+    if isinstance(expected_type, str):
+        return _coerce_scalar(expected_type, value)
+    return value
+
+
+def coerce_tool_arguments(arguments: dict[str, Any], input_schema: dict[str, Any] | None) -> dict[str, Any]:
+    if input_schema is None:
+        return arguments
+    coerced = _coerce_value(arguments, input_schema, input_schema)
+    return coerced if isinstance(coerced, dict) else arguments
 
 
 def validate_tool_arguments(arguments: dict[str, Any], input_schema: dict[str, Any] | None) -> None:
     if input_schema is None:
         return
-    _validate_value(arguments, input_schema, "$")
+    _validate_value(arguments, input_schema, "$", input_schema)
 
 
 def validate_execution_plan(plan: ExecutionPlan) -> None:
@@ -180,3 +429,37 @@ def validate_execution_plan(plan: ExecutionPlan) -> None:
     for call_id in call_ids:
         if color[call_id] == WHITE:
             visit(call_id, [call_id])
+
+    completed: set[str] = set()
+    for batch in plan.batches:
+        available = set(completed)
+        if batch.mode == "sequential":
+            for call in batch.calls:
+                refs = _collect_refs(call.arguments)
+                unavailable = [ref for ref in refs if ref not in available]
+                if unavailable:
+                    raise PlanValidationError(
+                        f"Call {call.id} references unavailable prior call ids: {unavailable}"
+                    )
+                deps = [dep for dep in call.depends_on if dep not in available]
+                if deps:
+                    raise PlanValidationError(
+                        f"Call {call.id} depends on unavailable prior call ids: {deps}"
+                    )
+                available.add(call.id)
+        else:
+            batch_ids = {call.id for call in batch.calls}
+            for call in batch.calls:
+                refs = _collect_refs(call.arguments)
+                unavailable = [ref for ref in refs if ref not in completed]
+                if unavailable:
+                    raise PlanValidationError(
+                        f"Parallel call {call.id} references unavailable prior call ids: {unavailable}"
+                    )
+                deps = [dep for dep in call.depends_on if dep not in completed]
+                if deps:
+                    raise PlanValidationError(
+                        f"Parallel call {call.id} depends on same/later batch call ids: {deps}"
+                    )
+            available.update(batch_ids)
+        completed = available

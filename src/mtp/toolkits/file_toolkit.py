@@ -15,9 +15,11 @@ class FileToolkit(ToolkitLoader):
         self.base_dir = Path(base_dir or Path.cwd()).resolve()
 
     def _is_under_base(self, candidate: Path) -> bool:
-        base = os.path.normcase(str(self.base_dir))
-        target = os.path.normcase(str(candidate))
-        return os.path.commonpath([base, target]) == base
+        try:
+            candidate.resolve(strict=False).relative_to(self.base_dir)
+            return True
+        except ValueError:
+            return False
 
     def _resolve(self, path: str) -> Path:
         candidate = (self.base_dir / path).resolve(strict=False)

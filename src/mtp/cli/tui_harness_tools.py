@@ -5,11 +5,13 @@ import fnmatch
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Any
 
 from mtp.protocol import ToolRiskLevel, ToolSpec
 from mtp.runtime import RegisteredTool, ToolkitLoader
+from mtp.codebase import CodebaseMemory
 
 
 _TEXT_EXTENSIONS = {
@@ -21,8 +23,6 @@ _DEFAULT_IGNORES = {
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", "dist", "build",
     ".mypy_cache", ".ruff_cache", ".next", ".turbo",
 }
-
-
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
     return {
         "type": "object",
@@ -30,6 +30,18 @@ def _schema(properties: dict[str, Any], required: list[str] | None = None) -> di
         "required": required or [],
         "additionalProperties": False,
     }
+
+
+def _query_schema(*, include_path: bool = True, include_limit: bool = True) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "query": {"type": "string"},
+        "pattern": {"type": "string"},
+    }
+    if include_path:
+        properties["path"] = {"type": "string"}
+    if include_limit:
+        properties["limit"] = {"type": "integer"}
+    return _schema(properties)
 
 
 class _Workspace:
@@ -78,10 +90,11 @@ class ContextToolkit(ToolkitLoader):
     def list_tool_specs(self) -> list[ToolSpec]:
         return [
             ToolSpec("project.inspect", "Inspect the workspace root, count source file formats, and report concise git status. Returns counts only for files, never a recursive file list.", _schema({}), risk_level=ToolRiskLevel.READ_ONLY, cache_ttl_seconds=15),
-            ToolSpec("fs.search", "Find relevant files by word, text, fuzzy, and lightweight semantic matching. Returns relative paths from the workspace root.", _schema({"query": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("fs.search", "Find relevant files by word, text, fuzzy, and lightweight semantic matching. Uses indexed workspace memory when available. Use `query` for the search text; `pattern` is accepted as an alias.", _query_schema(), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("fs.grep", "Search indexed workspace memory first, then live files, and return relevant matching snippets. Use `query` for the search text; `pattern` is accepted as an alias.", _query_schema(), risk_level=ToolRiskLevel.READ_ONLY),
             ToolSpec("fs.read_text", "Read a bounded line window from a workspace text file by relative path.", _schema({"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("agent.explore_codebase", "Subagent-style deep codebase search. Use for broad grep and locating relevant files.", _schema({"task": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}}, ["task"]), risk_level=ToolRiskLevel.READ_ONLY),
-            ToolSpec("agent.debug_context", "Subagent-style debug context gatherer: project summary, git diff, and likely files.", _schema({"symptom": {"type": "string"}, "query": {"type": "string"}}, ["symptom"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("agent.explore_codebase", "Subagent-style deep codebase search. Use for broad grep and locating relevant files. Use `query` for the search text; `pattern` is accepted as an alias.", _schema({"task": {"type": "string"}, "query": {"type": "string"}, "pattern": {"type": "string"}, "limit": {"type": "integer"}}, ["task"]), risk_level=ToolRiskLevel.READ_ONLY),
+            ToolSpec("agent.debug_context", "Subagent-style debug context gatherer: project summary, git diff, and likely files. Use `query` for the search text; `pattern` is accepted as an alias.", _schema({"symptom": {"type": "string"}, "query": {"type": "string"}, "pattern": {"type": "string"}}, ["symptom"]), risk_level=ToolRiskLevel.READ_ONLY),
         ]
 
     def load_tools(self) -> list[RegisteredTool]:
@@ -96,6 +109,7 @@ class ContextToolkit(ToolkitLoader):
                 total_files += 1
                 extensions[item.suffix.lower() or "(none)"] = extensions.get(item.suffix.lower() or "(none)", 0) + 1
             git = _run(["git", "status", "--short"], self.ws.root, timeout=8)
+            memory_status = CodebaseMemory(self.ws.root).status()
             return {
                 "root": str(self.ws.root),
                 "root_structure": self.ws.root_entries(),
@@ -104,6 +118,13 @@ class ContextToolkit(ToolkitLoader):
                     "by_extension": dict(sorted(extensions.items(), key=lambda kv: (-kv[1], kv[0]))),
                 },
                 "git_status": git.get("stdout", "")[:4000],
+                "codebase_memory": {
+                    "enabled": memory_status.enabled,
+                    "files": memory_status.file_count,
+                    "chunks": memory_status.chunk_count,
+                    "conversation_summaries": memory_status.summary_count,
+                    "last_scan_at": memory_status.last_scan_at,
+                },
             }
 
         def fs_read_text(path: str, start_line: int = 1, end_line: int = 240) -> dict[str, Any]:
@@ -128,7 +149,36 @@ class ContextToolkit(ToolkitLoader):
                 "content": content,
             }
 
-        def fs_search(query: str, path: str = ".", limit: int = 80) -> dict[str, Any]:
+        def fs_search(query: str | None = None, path: str = ".", limit: int = 80, pattern: str | None = None) -> dict[str, Any]:
+            query = (query or pattern or "").strip()
+            if not query:
+                raise ValueError("fs.search requires `query` (or alias `pattern`).")
+            memory = CodebaseMemory(self.ws.root)
+            if path in {".", "", None} and memory.is_enabled():
+                memory_hits = memory.search(query, limit=limit)
+                if memory_hits:
+                    return {
+                        "query": query,
+                        "source": "codebase_memory",
+                        "count": len(memory_hits),
+                        "total_matches": len(memory_hits),
+                        "truncated": False,
+                        "hits": [
+                            {
+                                "file": hit.file,
+                                "score": hit.score,
+                                "match": hit.match,
+                                "start_line": hit.start_line,
+                                "end_line": hit.end_line,
+                                "kind": hit.kind,
+                                "snippets": [hit.snippet],
+                            }
+                            for hit in memory_hits
+                        ],
+                    }
+            fast_hits = _search_with_ripgrep(self.ws, query=query, path=path, limit=limit)
+            if fast_hits is not None:
+                return fast_hits
             terms = _search_terms(query)
             query_norm = _normalize_text(query)
             hits: list[dict[str, Any]] = []
@@ -155,12 +205,15 @@ class ContextToolkit(ToolkitLoader):
                 "hits": bounded,
             }
 
-        def explore_codebase(task: str, query: str = "", limit: int = 120) -> dict[str, Any]:
-            probe = query or _keywords(task)
+        def fs_grep(query: str | None = None, path: str = ".", limit: int = 80, pattern: str | None = None) -> dict[str, Any]:
+            return fs_search(query=query, path=path, limit=limit, pattern=pattern)
+
+        def explore_codebase(task: str, query: str = "", limit: int = 120, pattern: str = "") -> dict[str, Any]:
+            probe = query or pattern or _keywords(task)
             return {"task": task, "query": probe, "hits": fs_search(probe, limit=limit), "project": project_inspect()}
 
-        def debug_context(symptom: str, query: str = "") -> dict[str, Any]:
-            probe = query or _keywords(symptom)
+        def debug_context(symptom: str, query: str = "", pattern: str = "") -> dict[str, Any]:
+            probe = query or pattern or _keywords(symptom)
             diff = _run(["git", "diff", "--", "."], self.ws.root, timeout=8).get("stdout", "")
             return {"symptom": symptom, "project": project_inspect(), "hits": fs_search(probe, limit=80), "git_diff": diff[:12000]}
 
@@ -168,6 +221,7 @@ class ContextToolkit(ToolkitLoader):
             "project.inspect": project_inspect,
             "fs.read_text": fs_read_text,
             "fs.search": fs_search,
+            "fs.grep": fs_grep,
             "agent.explore_codebase": explore_codebase,
             "agent.debug_context": debug_context,
         }
@@ -200,7 +254,12 @@ class EditToolkit(ToolkitLoader):
             after = before.replace(old_text, new_text) if replace_all else before.replace(old_text, new_text, 1)
             target.write_text(after, encoding="utf-8")
             diff = "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True), fromfile=f"a/{path}", tofile=f"b/{path}"))
-            return {"file": self.ws.rel(target), "replacements": count if replace_all else 1, "diff": diff[:20000]}
+            return {
+                "file": self.ws.rel(target),
+                "replacements": count if replace_all else 1,
+                "diff": diff[:20000],
+                "new_text": new_text[:20000],
+            }
 
         def create_file(path: str, content: str) -> dict[str, Any]:
             target = self.ws.resolve(path)
@@ -208,7 +267,11 @@ class EditToolkit(ToolkitLoader):
                 raise ValueError("Refusing to overwrite existing file.")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            return {"file": self.ws.rel(target), "bytes": len(content.encode("utf-8"))}
+            return {
+                "file": self.ws.rel(target),
+                "bytes": len(content.encode("utf-8")),
+                "content": content[:20000],
+            }
 
         return [
             RegisteredTool(spec=specs["edit.apply_patch"], handler=apply_patch),
@@ -362,4 +425,104 @@ def _run(cmd: list[str], cwd: Path, timeout: int) -> dict[str, Any]:
 def _run_shell(command: str, cwd: Path, timeout: int) -> dict[str, Any]:
     completed = subprocess.run(command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=max(1, int(timeout)))
     return {"returncode": completed.returncode, "stdout": completed.stdout.strip()[:30000], "stderr": completed.stderr.strip()[:12000]}
+
+
+def _search_with_ripgrep(ws: _Workspace, *, query: str, path: str, limit: int) -> dict[str, Any] | None:
+    rg_bin = shutil.which("rg")
+    if not rg_bin:
+        return None
+
+    search_root = ws.resolve(path or ".")
+    if search_root.is_file():
+        search_targets = [str(search_root)]
+    else:
+        search_targets = [str(search_root)]
+
+    base_cmd = [
+        rg_bin,
+        "--line-number",
+        "--smart-case",
+        "--max-count",
+        "3",
+        "--max-columns",
+        "240",
+        "--glob",
+        "!**/.git/**",
+        "--glob",
+        "!**/node_modules/**",
+        "--glob",
+        "!**/.venv/**",
+        "--glob",
+        "!**/venv/**",
+        "--glob",
+        "!**/__pycache__/**",
+        query,
+        *search_targets,
+    ]
+    try:
+        completed = subprocess.run(
+            base_cmd,
+            cwd=str(ws.root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+
+    hits_by_file: dict[str, dict[str, Any]] = {}
+    try:
+        file_list = subprocess.run(
+            [rg_bin, "--files", *search_targets],
+            cwd=str(ws.root),
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        query_terms = _search_terms(query)
+        for raw_file in file_list.stdout.splitlines():
+            normalized = raw_file.replace("\\", "/")
+            if _looks_secret(normalized):
+                continue
+            if any(term in normalized.lower() for term in query_terms):
+                entry = hits_by_file.setdefault(
+                    normalized,
+                    {"file": normalized, "score": 6.0, "match": ["path"], "snippets": [f"path: {normalized}"]},
+                )
+                entry["score"] = max(float(entry["score"]), 6.0)
+    except Exception:
+        pass
+
+    for line in completed.stdout.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        raw_file, line_no, snippet = parts
+        try:
+            rel_file = ws.rel(Path(raw_file) if Path(raw_file).is_absolute() else ws.root / raw_file)
+        except Exception:
+            rel_file = raw_file.replace("\\", "/")
+        if _looks_secret(rel_file):
+            continue
+        entry = hits_by_file.setdefault(
+            rel_file,
+            {"file": rel_file, "score": 0.0, "match": ["rg"], "snippets": []},
+        )
+        entry["score"] += 5.0
+        if len(entry["snippets"]) < 3:
+            entry["snippets"].append(f"{line_no}: {snippet.strip()[:240]}")
+
+    if not hits_by_file:
+        return None
+
+    hits = sorted(hits_by_file.values(), key=lambda item: (-float(item["score"]), str(item["file"])))
+    bounded = hits[: max(1, int(limit))]
+    return {
+        "query": query,
+        "source": "ripgrep",
+        "count": len(bounded),
+        "total_matches": len(hits),
+        "truncated": len(hits) > len(bounded),
+        "hits": bounded,
+    }
 

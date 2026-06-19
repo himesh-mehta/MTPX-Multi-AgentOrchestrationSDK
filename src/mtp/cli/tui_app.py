@@ -5,9 +5,12 @@ All LLM calls run in Worker threads; UI never blocks.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from pathlib import Path
+import time
 from typing import Any
+from uuid import uuid4
 
 from textual.app import App, ComposeResult
 from textual.widgets import OptionList, RichLog
@@ -18,20 +21,43 @@ from textual.worker import Worker, WorkerState
 from .tui_state import (
     TUIState, ChatResult, active_model_name,
     new_session_id, generate_session_title_from_prompt,
-    resolve_model, resolve_reasoning,
+    resolve_model,
     MODEL_PRESETS, REASONING_SHORTCUTS,
 )
+from .tui_thinking import apply_thinking_value, get_thinking_capability
 from .tui_widgets.chat_log import ChatLog, ChatMessage
 from .tui_widgets.input_area import InputPanel, InputArea, PromptLabel, AttachmentBadge
-from .tui_widgets.status_bar import StatusBar
-from .tui_widgets.sidebar import Sidebar, SessionInfo, ToolEventLog
+from .tui_widgets.status_bar import StatusBar, ThinkingBadge
+from .tui_widgets.sidebar import Sidebar, SessionInfo, ToolEventLog, RunMetrics, ShortcutHints, WorkspaceTree
 from .tui_widgets.spinner_widget import SpinnerWidget
 from .tui_widgets.boot_screen import BootScreen, BootInfo
+from .tui_widgets.thinking_dialog import ThinkingDialog
 from .tui_commands import MTPCommandProvider, parse_slash_command
 from .tui_workers import (
     save_tui_session, record_turn, collect_prompt_attachments,
     run_prompt_blocking, switch_backend,
 )
+
+_ARG_SUGGESTION_PREFIX = "-> "
+_SUGGESTION_SEPARATOR = " | "
+
+
+@dataclass(slots=True)
+class CodebaseScanResult:
+    root: Path
+    files_indexed: int
+    changed_files: int
+    files_deleted: int
+    chunks_indexed: int
+    db_path: Path
+
+
+@dataclass(slots=True)
+class CodebaseRefreshResult:
+    root: Path
+    changed_files: int
+    files_deleted: int
+    chunks_indexed: int
 
 
 class MTPApp(App):
@@ -56,10 +82,28 @@ class MTPApp(App):
         super().__init__(**kwargs)
         self._state = state
         self._pending_raw_prompt: str = ""
+        self._pending_display_prompt: str = ""
+        self._pending_display_attachments: list[str] = []
         self._history_index: int | None = None
         self._history_draft: str = ""
         self._pending_attachments: list[str] = []  # Track the raw prompt for recording
         self._input_history: list[str] = []
+        self._codebase_scan_progress: str | None = None
+        self._codebase_scan_root: Path | None = None
+        self._llm_worker_running = False
+        self._memory_refresh_running = False
+        self._live_status: str = ""
+        self._live_blocks: list[dict[str, Any]] = []
+        self._live_thinking_text: str = ""
+        self._live_tool_events: list[str] = []
+        self._live_tool_details: list[dict[str, Any]] = []
+        self._live_warnings: list[str] = []
+        self._last_live_render_at: float = 0.0
+        self._show_tool_details = False
+        self._memory_refresh_queued = False
+        self._memory_refresh_dirty = False
+        self._memory_launch_scan_done = False
+        self._current_run_id: str | None = None
 
     @property
     def state(self) -> TUIState:
@@ -82,9 +126,12 @@ class MTPApp(App):
 
     def on_mount(self) -> None:
         self._refresh_status_bar()
+        self._refresh_sidebar()
         self._refresh_prompt_label()
+        self._rebuild_chat_log()
         self._show_boot_info()
         self.set_timer(0.5, self._focus_input)
+        self._request_background_memory_refresh(reason="startup", prefer_full_scan=True)
 
     def _focus_input(self) -> None:
         try:
@@ -100,27 +147,92 @@ class MTPApp(App):
         model = active_model_name(self._state)
         sid = self._state.session_id.split("-")[-1][:8]
         cwd = str(self._state.cwd.name or self._state.cwd)
+        thinking = get_thinking_capability(self._state)
         boot_info = self.query_one("#boot-info", BootInfo)
         boot_info.set_info(
             version=__version__, backend=self._state.backend,
             model=model, session_short=sid, cwd=cwd,
+            thinking_label=thinking.label if thinking else None,
+            thinking_value=thinking.current_label if thinking else None,
         )
 
     # ── UI refresh helpers ───────────────────────────────────────────────
 
+    def _live_message_active(self) -> bool:
+        return bool(
+            self._live_blocks
+            or self._live_tool_events
+            or self._live_tool_details
+            or self._live_warnings
+        )
+
+    def _current_turn_banner(self) -> str:
+        return f"> {self._state.backend} - {active_model_name(self._state)} - mode={self._state.harness_mode}"
+
+    def _clear_pending_turn_display(self) -> None:
+        self._pending_display_prompt = ""
+        self._pending_display_attachments = []
+
+    def _rebuild_chat_log(self) -> None:
+        chat_log = self.query_one("#chat-log", ChatLog)
+        chat_log.clear()
+
+        for turn in self._state.transcript:
+            chat_log.add_user_message(turn.prompt, turn.attachments)
+            chat_log.add_assistant_message(
+                ChatMessage(
+                    role="assistant",
+                    text=turn.response,
+                    model=turn.model,
+                    backend=turn.backend,
+                    warnings=turn.warnings,
+                    usage_lines=turn.usage_lines,
+                    thinking=turn.thinking_text,
+                    tool_details=list(turn.tool_details),
+                    show_tool_details=self._show_tool_details,
+                    assistant_blocks=list(turn.assistant_blocks),
+                    collapse_thinking=True,
+                )
+            )
+
+        if self._pending_display_prompt:
+            chat_log.add_user_message(self._pending_display_prompt, self._pending_display_attachments)
+            chat_log.add_system_message(self._current_turn_banner())
+            if self._live_message_active():
+                chat_log.set_live_assistant_message(
+                    ChatMessage(
+                        role="assistant",
+                        text="",
+                        model=active_model_name(self._state),
+                        backend=self._state.backend,
+                        tool_events=list(self._live_tool_events),
+                        tool_details=list(self._live_tool_details),
+                        warnings=list(self._live_warnings),
+                        thinking=self._live_thinking_text.strip(),
+                        show_tool_details=self._show_tool_details,
+                        assistant_blocks=list(self._live_blocks),
+                        collapse_thinking=False,
+                        is_live=True,
+                    )
+                )
+
     def _refresh_status_bar(self) -> None:
         try:
+            thinking = get_thinking_capability(self._state)
             self.query_one("#status-bar", StatusBar).update_status(
                 backend=self._state.backend,
                 model=active_model_name(self._state),
                 session_id=self._state.session_id,
                 mode=self._state.harness_mode,
-                reasoning=self._state.reasoning_effort,
                 turn_count=len(self._state.transcript),
                 sandbox_mode=self._state.codex_sandbox_mode,
+                thinking_label=thinking.label if thinking else None,
+                thinking_value=thinking.current_label if thinking else None,
+                is_running=self._llm_worker_running,
             )
         except Exception:
             pass
+        self._show_boot_info()
 
     def _refresh_prompt_label(self) -> None:
         try:
@@ -133,6 +245,7 @@ class MTPApp(App):
 
     def _refresh_sidebar(self) -> None:
         try:
+            thinking = get_thinking_capability(self._state)
             self.query_one("#session-info", SessionInfo).update_info(
                 session_id=self._state.session_id,
                 label=self._state.session_label or "",
@@ -140,12 +253,36 @@ class MTPApp(App):
                 model=active_model_name(self._state),
                 turn_count=len(self._state.transcript),
                 mode=self._state.harness_mode,
+                thinking_label=thinking.label if thinking else None,
+                thinking_value=thinking.current_label if thinking else None,
             )
             self.query_one("#tool-event-log", ToolEventLog).update_events(
                 self._state.last_tool_events
             )
+            self.query_one("#run-metrics", RunMetrics).update_metrics(self._state.last_usage_lines)
+            self.query_one("#shortcut-hints", ShortcutHints).update_hints()
+            self.query_one("#workspace-tree", WorkspaceTree).refresh_tree(self._state.cwd)
         except Exception:
             pass
+
+    def on_thinking_badge_activated(self, event: ThinkingBadge.Activated) -> None:
+        capability = get_thinking_capability(self._state)
+        if capability is None:
+            return
+
+        def _apply(result: str | None) -> None:
+            if not result:
+                return
+            try:
+                message = apply_thinking_value(self._state, result)
+            except ValueError as exc:
+                self.notify(str(exc), title="Thinking", severity="error")
+                return
+            self._refresh_status_bar()
+            self._refresh_sidebar()
+            self.query_one("#chat-log", ChatLog).add_command_result(message)
+
+        self.push_screen(ThinkingDialog(capability), callback=_apply)
 
     # ── Input handling ───────────────────────────────────────────────────
 
@@ -206,6 +343,11 @@ class MTPApp(App):
                 self.query_one("#attachment-container").remove_class("visible")
 
     def action_hide_suggestions(self) -> None:
+        if self._llm_worker_running and self._current_run_id and self._state.backend != "codex" and self._state.agent is not None:
+            cancelled = self._state.agent.cancel_run(self._current_run_id)
+            if cancelled:
+                self.query_one("#chat-log", ChatLog).add_system_message("  Interrupt requested...", style="#fbbf24")
+            return
         try:
             option_list = self.query_one("#suggestion-list", OptionList)
             if option_list.has_class("visible"):
@@ -354,11 +496,13 @@ class MTPApp(App):
             "/sessions": "List saved sessions",
             "/history": "Show recent turns",
             "/tools": "Show last tool events",
+            "/details": "Toggle expanded tool metadata",
             "/backend": "Switch provider",
             "/model": "Switch model",
             "/models": "Show all models",
             "/apikey": "Manage API keys",
             "/reasoning": "Set reasoning level",
+            "/thinking": "Set thinking mode",
             "/mode": "Set harness mode",
             "/sandbox": "Cycle sandbox mode",
             "/load": "Load a session",
@@ -368,13 +512,14 @@ class MTPApp(App):
             "/rounds": "Set max rounds",
             "/cd": "Change directory",
             "/autoresearch": "Toggle auto-research",
-            "/research": "Set research instructions"
+            "/research": "Set research instructions",
+            "/codebase": "Codebase memory"
         }
         
         matches = []
         for cmd, desc in cmd_desc.items():
             if cmd.startswith(partial.lower()):
-                matches.append(f"{cmd}  ·  {desc}")
+                matches.append(f"{cmd}{_SUGGESTION_SEPARATOR}{desc}")
                 
         if not matches:
             try: self.query_one("#suggestion-list", OptionList).remove_class("visible")
@@ -419,7 +564,7 @@ class MTPApp(App):
                     if partial in search_str:
                         display = f"{sid}"
                         if label:
-                            display += f"  ·  {label}"
+                            display += f"{_SUGGESTION_SEPARATOR}{label}"
                         display += f"  ({turns} turns)"
                         matches.append(display)
             except Exception:
@@ -430,16 +575,55 @@ class MTPApp(App):
         elif cmd == "reasoning":
             from .tui_state import REASONING_SHORTCUTS
             matches = [m for m in REASONING_SHORTCUTS.values() if partial in m.lower()]
+        elif cmd == "details":
+            options = ["toggle", "on", "off"]
+            matches = [m for m in options if partial in m.lower()]
         elif cmd == "sandbox":
             options = ["read-only", "workspace-write", "danger-full-access"]
             matches = [m for m in options if partial in m.lower()]
+        elif cmd == "codebase":
+            normalized = partial.strip().lower()
+            if not normalized:
+                matches = ["memory", "status"]
+            elif normalized == "memory":
+                matches = ["on", "off"]
+            elif normalized.startswith("memory "):
+                tail = normalized.split(" ", 1)[1]
+                matches = [item for item in ["on", "off"] if item.startswith(tail)]
+            else:
+                matches = [m for m in ["memory", "status"] if m.startswith(normalized)]
             
         if not matches:
             try: self.query_one("#suggestion-list", OptionList).remove_class("visible")
             except Exception: pass
             return
             
-        self._populate_and_show_suggestions(matches, prefix="↳ ")
+        self._populate_and_show_suggestions(matches, prefix=_ARG_SUGGESTION_PREFIX)
+
+    @staticmethod
+    def _command_supports_arguments(cmd: str) -> bool:
+        return cmd in {
+            "backend", "model", "load", "sessions", "open", "mode",
+            "reasoning", "details", "sandbox", "codebase",
+        }
+
+    def _show_next_command_suggestions(self, input_area: InputArea) -> None:
+        cursor_row, cursor_col = input_area.cursor_location
+        lines = input_area.text.split("\n")
+        current_line = lines[cursor_row][:cursor_col]
+        if not current_line.startswith("/"):
+            return
+        parts = current_line.split()
+        if not parts:
+            self._show_command_suggestions("/")
+            return
+        cmd = parts[0][1:].lower()
+        if len(parts) == 1 and current_line.endswith(" ") and self._command_supports_arguments(cmd):
+            self._show_command_argument_suggestions(cmd, "")
+            return
+        if cmd == "codebase":
+            if len(parts) == 2 and parts[1].lower() == "memory" and current_line.endswith(" "):
+                self._show_command_argument_suggestions(cmd, "memory ")
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_list = event.option_list
@@ -454,8 +638,8 @@ class MTPApp(App):
         current_line = lines[cursor_row][:cursor_col]
         words = current_line.split()
         
-        if selected.startswith("↳ "):
-            val = selected[2:].split()[0]
+        if selected.startswith(_ARG_SUGGESTION_PREFIX):
+            val = selected[len(_ARG_SUGGESTION_PREFIX):].split()[0]
             parts = current_line.split()
             if current_line.endswith(" "):
                 new_line = current_line + val + " "
@@ -468,6 +652,7 @@ class MTPApp(App):
             lines[cursor_row] = new_line + lines[cursor_row][cursor_col:]
             input_area.text = "\n".join(lines)
             input_area.cursor_location = (cursor_row, start_idx + len(val) + 1)
+            self._show_next_command_suggestions(input_area)
             return
 
         if not words:
@@ -490,13 +675,14 @@ class MTPApp(App):
                 container.mount(AttachmentBadge(f"📎 {filename}"))
                 container.add_class("visible")
         else:
-            if "  ·  " in selected:
-                selected = selected.split("  ·  ")[0]
+            if _SUGGESTION_SEPARATOR in selected:
+                selected = selected.split(_SUGGESTION_SEPARATOR)[0]
             start_idx = current_line.rfind(last_word)
             new_line = current_line[:start_idx] + selected + " "
             lines[cursor_row] = new_line + lines[cursor_row][cursor_col:]
             input_area.text = "\n".join(lines)
             input_area.cursor_location = (cursor_row, start_idx + len(selected) + 1)
+            self._show_next_command_suggestions(input_area)
 
     def _send_prompt(self, raw: str) -> None:
         try:
@@ -504,27 +690,32 @@ class MTPApp(App):
         except Exception:
             pass
 
-        chat_log = self.query_one("#chat-log", ChatLog)
+        try:
+            cmd_log = self.query_one("#cmd-log", RichLog)
+            cmd_log.clear()
+            cmd_log.remove_class("visible")
+        except Exception:
+            pass
+
         spinner = self.query_one("#spinner", SpinnerWidget)
 
         expanded, attachments, att_warnings = collect_prompt_attachments(
             raw, self._state.cwd
         )
 
-        chat_log.add_user_message(raw, attachments)
-
-        model = active_model_name(self._state)
-        chat_log.add_system_message(
-            f"> {self._state.backend} · {model} · mode={self._state.harness_mode}"
-        )
-
+        self._reset_live_preview()
+        self._pending_display_prompt = raw
+        self._pending_display_attachments = list(attachments)
+        self._rebuild_chat_log()
         spinner.start("Thinking")
 
-        import time
         self._turn_start_time = time.monotonic()
 
         # Store raw prompt for turn recording
         self._pending_raw_prompt = raw
+        self._llm_worker_running = True
+        self._memory_refresh_dirty = False
+        self._current_run_id = f"run-{uuid4().hex[:12]}"
 
         self.run_worker(
             self._run_llm_worker(expanded, attachments, att_warnings),
@@ -536,25 +727,352 @@ class MTPApp(App):
     ) -> ChatResult:
         """Worker coroutine — runs blocking LLM call in thread."""
         import asyncio
+
+        def emit_live(kind: str, message: Any) -> None:
+            self.call_from_thread(self._handle_live_event, kind, message)
+
         result = await asyncio.to_thread(
-            run_prompt_blocking, self._state, expanded_prompt
+            run_prompt_blocking,
+            self._state,
+            expanded_prompt,
+            emit_callback=emit_live,
+            run_id=self._current_run_id,
         )
         result.attachments = attachments
         result.warnings = [*att_warnings, *result.warnings]
         return result
 
+    async def _run_codebase_scan_worker(self, root: Path) -> CodebaseScanResult:
+        import asyncio
+        from mtp.codebase import CodebaseMemory
+
+        memory = CodebaseMemory(root)
+
+        def progress(stats) -> None:
+            self.call_from_thread(self._update_codebase_scan_progress, stats.percent, stats.files_seen, stats.changed_files)
+
+        stats = await asyncio.to_thread(memory.scan, enable=True, progress=progress)
+        return CodebaseScanResult(
+            root=root,
+            files_indexed=stats.files_indexed,
+            changed_files=stats.changed_files,
+            files_deleted=stats.files_deleted,
+            chunks_indexed=stats.chunks_indexed,
+            db_path=memory.db_path,
+        )
+
+    async def _run_codebase_refresh_worker(self, root: Path) -> CodebaseRefreshResult:
+        import asyncio
+        from mtp.codebase import CodebaseMemory
+
+        memory = CodebaseMemory(root)
+        stats = await asyncio.to_thread(memory.refresh_changed)
+        return CodebaseRefreshResult(
+            root=root,
+            changed_files=stats.changed_files,
+            files_deleted=stats.files_deleted,
+            chunks_indexed=stats.chunks_indexed,
+        )
+
+    def _update_codebase_scan_progress(self, percent: int, files_seen: int, changed_files: int) -> None:
+        self._codebase_scan_progress = f"Indexing codebase {percent}%  files={files_seen} changed={changed_files}"
+        try:
+            self.query_one("#spinner", SpinnerWidget).update_label(self._codebase_scan_progress)
+        except Exception:
+            pass
+
+    def _append_cmd_log(self, message: str, *, style: str = "#a78bfa") -> None:
+        from rich.text import Text
+
+        cmd_log = self.query_one("#cmd-log", RichLog)
+        cmd_log.add_class("visible")
+        cmd_log.write(Text(f"  {message}", style=style))
+
+    def _request_background_memory_refresh(self, *, reason: str, prefer_full_scan: bool = False) -> None:
+        try:
+            from mtp.codebase import CodebaseMemory
+
+            memory = CodebaseMemory(self._state.cwd)
+            status = memory.status()
+            if not status.enabled:
+                self._memory_refresh_queued = False
+                return
+        except Exception:
+            return
+
+        if self._llm_worker_running or self._memory_refresh_running or self._codebase_scan_progress is not None:
+            self._memory_refresh_queued = True
+            return
+
+        should_full_scan = prefer_full_scan or not status.last_scan_at or status.file_count == 0 or status.chunk_count == 0
+        if should_full_scan:
+            self._memory_launch_scan_done = True
+            spinner = self.query_one("#spinner", SpinnerWidget)
+            spinner.start("Indexing codebase 0%")
+            self._codebase_scan_root = self._state.cwd
+            self._codebase_scan_progress = "Indexing codebase 0%"
+            self.run_worker(
+                self._run_codebase_scan_worker(self._state.cwd),
+                name="codebase_scan",
+                exclusive=True,
+            )
+            return
+
+        self._memory_refresh_running = True
+        self.run_worker(
+            self._run_codebase_refresh_worker(self._state.cwd),
+            name="codebase_refresh",
+            exclusive=False,
+        )
+
+    def _format_codebase_memory_show(self, root: Path) -> str:
+        from mtp.codebase import CodebaseMemory
+
+        data = CodebaseMemory(root).show(limit=8)
+        lines = [
+            f"Codebase memory {'ON' if data['enabled'] else 'OFF'}",
+            f"root={data['root']}",
+            f"db={data['db_path']}",
+            f"db_size_bytes={data['db_size_bytes']}",
+            f"files={data['files']} chunks={data['chunks']} summaries={data['summaries']}",
+            f"last_scan_at={data['last_scan_at'] or '(never)'}",
+        ]
+        if data["languages"]:
+            lines.append("languages=" + ", ".join(f"{item['language']}:{item['files']}" for item in data["languages"]))
+        if data["chunk_kinds"]:
+            lines.append("chunk_kinds=" + ", ".join(f"{item['kind']}:{item['count']}" for item in data["chunk_kinds"]))
+        if data["largest_files"]:
+            lines.append("largest_files=")
+            for item in data["largest_files"]:
+                lines.append(f"  {item['path']} size={item['size']} lines={item['lines']} lang={item['language']}")
+        if data["recent_summaries"]:
+            lines.append("recent_summaries=")
+            for item in data["recent_summaries"]:
+                model = f" model={item['model']}" if item["model"] else ""
+                lines.append(f"  {item['created_at']} {item['title']}{model}")
+        return "\n".join(lines)
+
+    def _append_live_thinking_block(self, text: str) -> None:
+        if not text:
+            return
+        self._live_thinking_text += text
+        if self._live_blocks and self._live_blocks[-1].get("type") == "thinking":
+            self._live_blocks[-1]["text"] = str(self._live_blocks[-1].get("text") or "") + text
+            return
+        self._live_blocks.append({"type": "thinking", "text": text})
+
+    def _append_live_text_block(self, text: str) -> None:
+        if not text:
+            return
+        if self._live_blocks and self._live_blocks[-1].get("type") == "text":
+            self._live_blocks[-1]["text"] = str(self._live_blocks[-1].get("text") or "") + text
+            return
+        self._live_blocks.append({"type": "text", "text": text})
+
+    def _ensure_live_tool_group(self, *, batch_index: Any = None, mode: str | None = None) -> dict[str, Any]:
+        if self._live_blocks and self._live_blocks[-1].get("type") == "tool_group":
+            block = self._live_blocks[-1]
+            if batch_index is None or block.get("batch_index") == batch_index:
+                if mode and not block.get("mode"):
+                    block["mode"] = mode
+                return block
+        block = {"type": "tool_group", "batch_index": batch_index, "mode": mode or "unknown", "items": []}
+        self._live_blocks.append(block)
+        return block
+
+    def _upsert_live_tool_item(self, detail: dict[str, Any]) -> None:
+        dtype = str(detail.get("type") or "")
+        if dtype == "batch_started":
+            self._ensure_live_tool_group(batch_index=detail.get("batch_index"), mode=str(detail.get("mode") or "unknown"))
+            return
+
+        if dtype not in {"tool_started", "tool_finished"}:
+            return
+        call_id = str(detail.get("call_id") or detail.get("tool_name") or "tool")
+        for block in self._live_blocks:
+            if block.get("type") != "tool_group":
+                continue
+            for item in block.get("items") or []:
+                if str(item.get("call_id") or "") == call_id:
+                    item["status"] = "running" if dtype == "tool_started" else ("completed" if detail.get("success") else "failed")
+                    item["reasoning"] = detail.get("reasoning")
+                    item["cached"] = detail.get("cached")
+                    item["error"] = detail.get("error")
+                    if detail.get("result_preview") is not None:
+                        item["result_preview"] = detail.get("result_preview")
+                    if detail.get("started_at_ms") is not None:
+                        item["started_at_ms"] = detail.get("started_at_ms")
+                    if detail.get("finished_at_ms") is not None:
+                        item["finished_at_ms"] = detail.get("finished_at_ms")
+                    return
+
+        block = self._ensure_live_tool_group(batch_index=detail.get("batch_index"))
+        block["items"].append(
+            {
+                "call_id": call_id,
+                "tool_name": str(detail.get("tool_name") or "tool"),
+                "status": "running" if dtype == "tool_started" else ("completed" if detail.get("success") else "failed"),
+                "reasoning": detail.get("reasoning"),
+                "cached": detail.get("cached"),
+                "error": detail.get("error"),
+                "started_at_ms": detail.get("started_at_ms"),
+                "finished_at_ms": detail.get("finished_at_ms"),
+                "result_preview": detail.get("result_preview"),
+            }
+        )
+
+    @staticmethod
+    def _tool_mutates_workspace(tool_name: str) -> bool:
+        return tool_name.startswith(("edit.", "shell.", "test."))
+
+    def _reset_live_preview(self) -> None:
+        self._live_status = ""
+        self._live_blocks = []
+        self._live_thinking_text = ""
+        self._live_tool_events = []
+        self._live_tool_details = []
+        self._live_warnings = []
+        self._last_live_render_at = 0.0
+        try:
+            self.query_one("#chat-log", ChatLog).clear_live_assistant_message()
+        except Exception:
+            pass
+
+    def _render_live_preview(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_live_render_at < 0.10:
+            return
+        self._last_live_render_at = now
+        if not self._pending_display_prompt:
+            return
+        self.query_one("#chat-log", ChatLog).set_live_assistant_message(
+            ChatMessage(
+                role="assistant",
+                text="",
+                model=active_model_name(self._state),
+                backend=self._state.backend,
+                tool_events=list(self._live_tool_events),
+                tool_details=list(self._live_tool_details),
+                warnings=list(self._live_warnings),
+                thinking=self._live_thinking_text.strip(),
+                show_tool_details=self._show_tool_details,
+                assistant_blocks=list(self._live_blocks),
+                collapse_thinking=False,
+                is_live=True,
+            )
+        )
+
+    def _handle_live_event(self, kind: str, message: Any) -> None:
+        spinner = self.query_one("#spinner", SpinnerWidget)
+        if kind == "status":
+            if message in {"Sending request to provider...", "Processing response..."}:
+                self._live_status = ""
+            else:
+                self._live_status = message
+                spinner.update_label(message or "Thinking")
+        elif kind in {"tool", "tool_end"}:
+            self._live_tool_events.append(message)
+            self._state.last_tool_events = list(self._live_tool_events)
+            self._refresh_sidebar()
+        elif kind == "tool_detail":
+            try:
+                detail = dict(message)  # type: ignore[arg-type]
+            except Exception:
+                detail = {"type": "detail", "message": str(message)}
+            self._live_tool_details.append(detail)
+            self._state.last_tool_details = list(self._live_tool_details)
+            self._upsert_live_tool_item(detail)
+            if (
+                str(detail.get("type") or "") == "tool_finished"
+                and detail.get("success")
+                and self._tool_mutates_workspace(str(detail.get("tool_name") or ""))
+            ):
+                self._memory_refresh_dirty = True
+        elif kind == "warn":
+            self._live_warnings.append(message)
+        elif kind == "reasoning":
+            self._append_live_thinking_block(str(message))
+            if not self._live_status:
+                spinner.update_label("Reasoning")
+        elif kind == "text":
+            self._append_live_text_block(str(message))
+            if not self._live_status:
+                spinner.update_label("Streaming response")
+        else:
+            self._live_status = message
+        self._render_live_preview()
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        spinner = self.query_one("#spinner", SpinnerWidget)
+
+        if event.worker.name == "codebase_scan":
+            if event.state == WorkerState.SUCCESS:
+                spinner.stop()
+                result: CodebaseScanResult = event.worker.result
+                self._state.cwd = result.root
+                self._state.agent = None
+                save_tui_session(self._state)
+                self._refresh_prompt_label()
+                self._refresh_status_bar()
+                self._append_cmd_log(
+                    "Codebase memory scan complete: 100%\n"
+                    f"  files={result.files_indexed} changed={result.changed_files} "
+                    f"deleted={result.files_deleted} chunks={result.chunks_indexed}\n"
+                    f"  saved={result.db_path}"
+                )
+                self._codebase_scan_progress = None
+            elif event.state == WorkerState.ERROR:
+                spinner.stop()
+                self._append_cmd_log(f"Codebase scan failed: {event.worker.error}", style="bold #f43f5e")
+                self._codebase_scan_progress = None
+            elif event.state == WorkerState.CANCELLED:
+                spinner.stop()
+                self._append_cmd_log("Codebase scan cancelled.", style="#fbbf24")
+                self._codebase_scan_progress = None
+            if self._memory_refresh_queued:
+                self._memory_refresh_queued = False
+                self._request_background_memory_refresh(reason="queued-post-scan")
+            return
+
+        if event.worker.name == "codebase_refresh":
+            if event.state == WorkerState.SUCCESS:
+                result: CodebaseRefreshResult = event.worker.result
+                if result.changed_files or result.files_deleted:
+                    self._append_cmd_log(
+                        "Background memory refresh complete\n"
+                        f"  changed={result.changed_files} deleted={result.files_deleted} "
+                        f"chunks={result.chunks_indexed}",
+                        style="#38bdf8",
+                    )
+            elif event.state == WorkerState.ERROR:
+                self._append_cmd_log(
+                    f"Background memory refresh failed: {event.worker.error}",
+                    style="bold #f43f5e",
+                )
+            self._memory_refresh_running = False
+            if self._memory_refresh_queued:
+                self._memory_refresh_queued = False
+                self._request_background_memory_refresh(reason="queued-post-refresh")
+            return
+
         if event.worker.name != "llm_call":
             return
 
-        spinner = self.query_one("#spinner", SpinnerWidget)
+        if event.state in {WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED}:
+            self._llm_worker_running = False
+            self._current_run_id = None
 
         if event.state == WorkerState.SUCCESS:
             spinner.stop()
             result: ChatResult = event.worker.result
+            if self._live_blocks and not result.assistant_blocks:
+                result.assistant_blocks = list(self._live_blocks)
+            if self._live_thinking_text and not result.thinking_text:
+                result.thinking_text = self._live_thinking_text.strip()
 
             # Record the turn with the original raw prompt
             record_turn(self._state, self._pending_raw_prompt, result)
+            self._request_background_memory_refresh(reason="post-run")
 
             # Auto-generate title from first prompt
             if len(self._state.transcript) == 1 and not self._state.session_label:
@@ -563,48 +1081,36 @@ class MTPApp(App):
                 )
                 save_tui_session(self._state)
 
-            # Extract thinking from usage lines
-            thinking = ""
-            for uline in result.usage_lines:
-                if uline.startswith("thinking="):
-                    thinking = uline.replace("thinking=", "").strip()
-                    break
-
-            # Calculate elapsed time
-            import time
-            elapsed = time.monotonic() - getattr(self, "_turn_start_time", time.monotonic())
-
-            # Render response
-            chat_log = self.query_one("#chat-log", ChatLog)
-            chat_log.add_assistant_message(ChatMessage(
-                role="assistant", text=result.text,
-                model=active_model_name(self._state),
-                backend=self._state.backend,
-                tool_events=result.tool_events,
-                warnings=result.warnings,
-                usage_lines=result.usage_lines,
-                thinking=thinking,
-                duration_sec=elapsed,
-            ))
-
             self._state.last_tool_events = list(result.tool_events)
+            self._state.last_tool_details = list(result.tool_details)
             self._state.last_warnings = list(result.warnings)
+            self._clear_pending_turn_display()
+            self._reset_live_preview()
+            self._rebuild_chat_log()
             self._refresh_status_bar()
             self._refresh_sidebar()
 
         elif event.state == WorkerState.ERROR:
             spinner.stop()
+            self._clear_pending_turn_display()
+            self._reset_live_preview()
+            self._rebuild_chat_log()
             self.query_one("#chat-log", ChatLog).add_system_message(
-                f"⚡ Error: {event.worker.error}", style="bold #f43f5e"
+                f"Error: {event.worker.error}", style="bold #f43f5e"
             )
+            self._request_background_memory_refresh(reason="post-run-error")
 
         elif event.state == WorkerState.CANCELLED:
             spinner.stop()
+            self._clear_pending_turn_display()
+            self._reset_live_preview()
+            self._rebuild_chat_log()
             self.query_one("#chat-log", ChatLog).add_system_message(
-                "⚡ Request cancelled.", style="#fbbf24"
+                "Request cancelled.", style="#fbbf24"
             )
+            self._request_background_memory_refresh(reason="post-run-cancelled")
 
-    # ── Command dispatch (from slash commands and CommandPalette) ─────────
+        self._refresh_status_bar()
 
     def action_cmd_dispatch(self, cmd: str, arg: str) -> None:
         """Central action handler called by CommandPalette entries."""
@@ -685,6 +1191,24 @@ class MTPApp(App):
             chat_log.add_system_message(self._build_models_text())
         elif cmd == "tools":
             chat_log.add_system_message(self._build_tools_text())
+        elif cmd == "details":
+            normalized = arg.strip().lower()
+            if normalized in {"", "toggle"}:
+                self._show_tool_details = not self._show_tool_details
+            elif normalized in {"on", "true", "1"}:
+                self._show_tool_details = True
+            elif normalized in {"off", "false", "0"}:
+                self._show_tool_details = False
+            else:
+                chat_log.add_command_result("Usage: /details <toggle|on|off>")
+                return
+            chat_log.add_command_result(
+                f"Tool details {'enabled' if self._show_tool_details else 'disabled'}."
+            )
+            self._rebuild_chat_log()
+            self._refresh_status_bar()
+            self._refresh_sidebar()
+            return
         elif cmd == "new" or cmd == "reset":
             s.session_id = new_session_id()
             s.session_label = arg or None
@@ -693,6 +1217,9 @@ class MTPApp(App):
             s.agent = None
             s.codex_session_id = None
             save_tui_session(s)
+            self._clear_pending_turn_display()
+            self._reset_live_preview()
+            self._rebuild_chat_log()
             chat_log.add_command_result(
                 f"✓ New session {s.session_id}" + (f" ({arg})" if arg else "")
             )
@@ -724,15 +1251,28 @@ class MTPApp(App):
                 except Exception: pass
             else:
                 self._handle_model_switch(arg)
-        elif cmd == "reasoning":
-            resolved = resolve_reasoning(arg) if arg else None
-            if resolved:
-                s.reasoning_effort = resolved
-                save_tui_session(s)
-                chat_log.add_command_result(f"✓ Reasoning set to {resolved}")
-            else:
-                chat_log.add_command_result("Usage: /reasoning <none|low|medium|high|xhigh>")
+        elif cmd in {"reasoning", "thinking"}:
+            capability = get_thinking_capability(s)
+            if capability is None:
+                chat_log.add_command_result("Thinking controls are not available for the current backend/model.")
+                self._refresh_status_bar()
+                self._refresh_sidebar()
+                return
+            if not arg:
+                choices = ", ".join(option.label for option in capability.options)
+                chat_log.add_command_result(f"Usage: /{cmd} <{choices}>")
+                self._refresh_status_bar()
+                self._refresh_sidebar()
+                return
+            try:
+                message = apply_thinking_value(s, arg)
+                chat_log.add_command_result(message)
+            except ValueError:
+                choices = ", ".join(option.label for option in capability.options)
+                chat_log.add_command_result(f"Usage: /{cmd} <{choices}>")
             self._refresh_status_bar()
+            self._refresh_sidebar()
+            return
         elif cmd == "mode":
             from .tui_harness_policy import normalize_harness_mode, HARNESS_MODES
             if not arg:
@@ -778,6 +1318,8 @@ class MTPApp(App):
             s.agent = None
             save_tui_session(s)
             chat_log.add_command_result("✓ research_instructions updated")
+        elif cmd == "codebase":
+            self._handle_codebase(arg, chat_log)
         elif cmd == "sandbox":
             self._handle_sandbox(arg)
         elif cmd == "apikey":
@@ -806,7 +1348,7 @@ class MTPApp(App):
             if not arg:
                 chat_log.add_command_result("Usage: /open <session_id>")
             else:
-                chat_log.add_system_message(f"Session viewer not yet in Textual. Use legacy mode (MTP_TUI_LEGACY=1).")
+                chat_log.add_system_message(self._build_session_open_text(arg))
         elif cmd == "codex-login":
             from . import tui_codex_backend as codex_backend
             codex_bin = s.codex_bin or codex_backend.detect_codex_bin()
@@ -817,14 +1359,83 @@ class MTPApp(App):
                 chat_log.add_command_result("Codex CLI not found")
         elif cmd == "compose":
             chat_log.add_system_message("Compose: use Shift+Enter for newlines, Enter to submit.")
-        elif cmd == "cat":
-            chat_log.add_command_result("Cat companion not available in Textual mode.")
         elif cmd == "unknown":
             chat_log.add_command_result("Unknown command. Press Ctrl+P for available commands.")
         else:
             chat_log.add_command_result(f"Unknown: /{cmd}")
 
     # ── Model / Sandbox / API key handlers ───────────────────────────────
+
+    def _handle_codebase(self, arg: str, chat_log: Any) -> None:
+        from mtp.codebase import CodebaseMemory
+
+        pieces = arg.split()
+        if not pieces:
+            self._open_codebase_memory_picker(self._state.cwd, chat_log)
+            return
+
+        sub = pieces[0].lower()
+        if sub == "status":
+            status = CodebaseMemory(self._state.cwd).status()
+            chat_log.add_command_result(
+                f"Codebase memory {'ON' if status.enabled else 'OFF'}\n"
+                f"root={status.root}\n"
+                f"files={status.file_count} chunks={status.chunk_count} summaries={status.summary_count}\n"
+                f"last_scan_at={status.last_scan_at or '(never)'}"
+            )
+            self._reset_live_preview()
+            return
+
+        if sub != "memory":
+            chat_log.add_command_result("Usage: /codebase memory <on|off|show> [root] or /codebase status")
+            return
+
+        action = pieces[1].lower() if len(pieces) >= 2 else ""
+        root = Path(" ".join(pieces[2:])).expanduser().resolve() if len(pieces) >= 3 else self._state.cwd
+        memory = CodebaseMemory(root)
+
+        if action == "show":
+            chat_log.add_command_result(self._format_codebase_memory_show(root))
+            self._reset_live_preview()
+            return
+
+        if action == "off":
+            memory.set_enabled(False)
+            chat_log.add_command_result(f"Codebase memory OFF for {root}")
+            self._refresh_status_bar()
+            return
+
+        if action != "on":
+            self._open_codebase_memory_picker(root, chat_log)
+            return
+
+        spinner = self.query_one("#spinner", SpinnerWidget)
+        spinner.start("Indexing codebase 0%")
+        self._codebase_scan_root = root
+        self._codebase_scan_progress = "Indexing codebase 0%"
+        chat_log.add_command_result(f"Starting codebase memory scan for {root}")
+        self.run_worker(
+            self._run_codebase_scan_worker(root),
+            name="codebase_scan",
+            exclusive=True,
+        )
+
+    def _open_codebase_memory_picker(self, root: Path, chat_log: Any) -> None:
+        from mtp.codebase import CodebaseMemory
+
+        status = CodebaseMemory(root).status()
+        chat_log.add_command_result(
+            f"Current project root: {root}\n"
+            f"Codebase memory is {'ON' if status.enabled else 'OFF'}.\n"
+            "Choose on/off/show with arrows + Enter."
+        )
+        input_area = self.query_one("#chat-input", InputArea)
+        input_area.text = "/codebase memory "
+        input_area.cursor_location = (0, len(input_area.text))
+        self._populate_and_show_suggestions(["on", "off", "show"], prefix=_ARG_SUGGESTION_PREFIX)
+        option_list = self.query_one("#suggestion-list", OptionList)
+        option_list.focus()
+        option_list.highlighted = 0
 
     def _handle_model_switch(self, arg: str) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
@@ -840,6 +1451,7 @@ class MTPApp(App):
                 provider_settings_path, load_provider_settings,
                 ensure_provider_entry, save_provider_settings,
             )
+            self._reset_live_preview()
             settings_path = provider_settings_path(s.session_store.file_path)
             settings = load_provider_settings(settings_path)
             entry = ensure_provider_entry(settings, s.backend)
@@ -849,6 +1461,7 @@ class MTPApp(App):
             save_tui_session(s)
             chat_log.add_command_result(f"✓ {s.backend} model: {resolved}")
         self._refresh_status_bar()
+        self._refresh_sidebar()
 
     def _handle_sandbox(self, arg: str) -> None:
         chat_log = self.query_one("#chat-log", ChatLog)
@@ -883,6 +1496,103 @@ class MTPApp(App):
 
     # ── Text builders ────────────────────────────────────────────────────
 
+    def _list_saved_sessions(self) -> list[Any]:
+        import json
+        from mtp import SessionRecord
+
+        sessions: list[SessionRecord] = []
+        if not self._state.session_store.file_path.exists():
+            return sessions
+        rows = json.loads(self._state.session_store.file_path.read_text(encoding="utf-8"))
+        if not isinstance(rows, list):
+            return sessions
+        for row in rows:
+            if isinstance(row, dict):
+                sessions.append(SessionRecord.from_dict(row))
+        sessions.sort(key=lambda item: item.updated_at, reverse=True)
+        return sessions
+
+    def _find_session_by_partial_id(self, session_id_input: str) -> Any | None:
+        needle = session_id_input.strip().lower()
+        if not needle:
+            return None
+        for record in self._list_saved_sessions():
+            if record.session_id.lower() == needle:
+                return record
+            short_id = record.session_id.split("-")[-1][:8].lower()
+            if short_id == needle or record.session_id.lower().endswith(needle):
+                return record
+        return None
+
+    def _format_tool_detail_line(self, detail: dict[str, Any]) -> str:
+        dtype = str(detail.get("type") or "detail")
+        if dtype == "plan_received":
+            source = detail.get("tool_call_source") or "unknown"
+            raw_calls = detail.get("raw_tool_call_count")
+            batches = detail.get("derived_batch_count")
+            modes = ",".join(str(mode) for mode in detail.get("derived_batch_modes") or []) or "-"
+            return f"plan source={source} raw_calls={raw_calls} batches={batches} modes={modes}"
+        if dtype == "batch_started":
+            batch_index = detail.get("batch_index")
+            mode = detail.get("mode") or "unknown"
+            call_ids = ",".join(str(item) for item in detail.get("call_ids") or []) or "-"
+            return f"batch#{batch_index} mode={mode} call_ids={call_ids}"
+        if dtype == "tool_started":
+            tool_name = detail.get("tool_name") or "unknown"
+            call_id = detail.get("call_id") or "-"
+            depends_on = ",".join(str(item) for item in detail.get("depends_on") or []) or "-"
+            return f"start {tool_name} call_id={call_id} depends_on={depends_on}"
+        if dtype == "tool_finished":
+            tool_name = detail.get("tool_name") or "unknown"
+            call_id = detail.get("call_id") or "-"
+            success = detail.get("success")
+            cached = detail.get("cached")
+            return f"finish {tool_name} call_id={call_id} success={success} cached={cached}"
+        return str(detail)
+
+    def _build_session_open_text(self, session_id_input: str) -> Any:
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.text import Text
+
+        record = self._find_session_by_partial_id(session_id_input)
+        if record is None:
+            return f"Session not found: {session_id_input}"
+
+        tui_meta = record.metadata.get("tui", {}) if isinstance(record.metadata, dict) else {}
+        tui_meta = tui_meta if isinstance(tui_meta, dict) else {}
+        transcript = tui_meta.get("transcript") or []
+
+        header = Text()
+        header.append(f"session={record.session_id}\n", style="bold #c084fc")
+        header.append(f"updated_at={record.updated_at}\n", style="#71717a")
+        if tui_meta.get("session_label"):
+            header.append(f"label={tui_meta['session_label']}\n", style="#f4f4f6")
+        header.append(f"backend={tui_meta.get('backend') or 'unknown'}", style="#34d399")
+
+        renderables: list[Any] = [header]
+        if not transcript:
+            renderables.append(Text("\n\nNo transcript turns stored.", style="#71717a"))
+        else:
+            start_index = max(1, len(transcript) - 9)
+            for index, item in enumerate(transcript[-10:], start=start_index):
+                if not isinstance(item, dict):
+                    continue
+                prompt = str(item.get("prompt") or "").replace("\n", " ")[:120]
+                response = str(item.get("response") or "").replace("\n", " ")[:160]
+                block = Text()
+                block.append(f"\n\n#{index}\n", style="bold #fbbf24")
+                block.append(f"prompt: {prompt}\n", style="#ec4899")
+                block.append(f"response: {response}", style="#8b5cf6")
+                detail_items = item.get("tool_details") or []
+                if self._show_tool_details and isinstance(detail_items, list):
+                    for detail in detail_items[:4]:
+                        if isinstance(detail, dict):
+                            block.append(f"\n  detail: {self._format_tool_detail_line(detail)}", style="#93c5fd")
+                renderables.append(block)
+
+        return Panel(Group(*renderables), title="[bold #38bdf8]Session Viewer[/]", border_style="#3f3f46")
+
     def _build_help_text(self) -> Any:
         from rich.table import Table
         from rich.panel import Panel
@@ -899,14 +1609,18 @@ class MTPApp(App):
         table.add_row("", "/sessions", "List saved sessions")
         table.add_row("", "/history", "Show recent turns")
         table.add_row("", "/tools", "Show last tool events")
+        table.add_row("", "/details", "Toggle expanded tool metadata")
+        table.add_row("", "/open <session_id>", "Open a saved session transcript")
         
         table.add_row("Backend & Model", "/backend <p>", "Switch provider")
         table.add_row("", "/model <name>", "Switch model")
         table.add_row("", "/models", "Show all models")
         table.add_row("", "/apikey", "Manage API keys")
-        table.add_row("", "/reasoning", "Set reasoning level")
+        table.add_row("", "/reasoning", "Set reasoning level / thinking mode")
+        table.add_row("", "/thinking", "Set thinking mode")
         table.add_row("", "/mode", "Set harness mode")
         table.add_row("", "/sandbox", "Cycle sandbox mode")
+        table.add_row("", "/codebase memory", "Enable, disable, or inspect project memory")
         
         table.add_row("Keys", "Ctrl+P", "Command palette")
         table.add_row("", "Ctrl+B", "Toggle sidebar")
@@ -919,6 +1633,7 @@ class MTPApp(App):
         from rich.table import Table
         from rich.panel import Panel
         s = self._state
+        thinking = get_thinking_capability(s)
         
         table = Table(show_header=False, box=None, padding=(0, 2))
         table.add_column("Key", style="bold #38bdf8")
@@ -929,32 +1644,32 @@ class MTPApp(App):
         table.add_row("backend", s.backend)
         table.add_row("model", active_model_name(s))
         table.add_row("mode", s.harness_mode)
-        table.add_row("reasoning", str(s.reasoning_effort))
+        if thinking:
+            table.add_row(thinking.label, thinking.current_label)
         table.add_row("sandbox", s.codex_sandbox_mode)
         table.add_row("rounds", str(s.max_rounds))
+        table.add_row("tool_details", "on" if self._show_tool_details else "off")
         table.add_row("cwd", str(s.cwd))
         table.add_row("turns", str(len(s.transcript)))
         table.add_row("autoresearch", str(s.autoresearch))
+        try:
+            from mtp.codebase import CodebaseMemory
+
+            memory_status = CodebaseMemory(s.cwd).status()
+            table.add_row("codebase_memory", "on" if memory_status.enabled else "off")
+            table.add_row("memory_chunks", str(memory_status.chunk_count))
+        except Exception:
+            table.add_row("codebase_memory", "unknown")
         
         return Panel(table, title="[bold #34d399]Session Status[/]", border_style="#3f3f46")
 
     def _build_sessions_text(self) -> Any:
-        import json
-        from mtp import SessionRecord
         from rich.table import Table
         from rich.panel import Panel
-        
-        sessions: list[SessionRecord] = []
+
+        sessions = []
         try:
-            if self._state.session_store.file_path.exists():
-                rows = json.loads(
-                    self._state.session_store.file_path.read_text(encoding="utf-8")
-                )
-                if isinstance(rows, list):
-                    for row in rows:
-                        if isinstance(row, dict):
-                            sessions.append(SessionRecord.from_dict(row))
-            sessions.sort(key=lambda x: x.updated_at, reverse=True)
+            sessions = self._list_saved_sessions()
         except Exception:
             return "No saved sessions."
             
@@ -1026,7 +1741,7 @@ class MTPApp(App):
         from rich.panel import Panel
         from rich.text import Text
         
-        if not self._state.last_tool_events:
+        if not self._state.last_tool_events and not self._state.last_tool_details:
             return "No tool events from last turn."
             
         group = []
@@ -1034,6 +1749,16 @@ class MTPApp(App):
         for e in self._state.last_tool_events:
             text.append(f"  ├─ {e}\n", style="#2dd4bf")
         group.append(text)
+        if self._show_tool_details and self._state.last_tool_details:
+            detail_text = Text("\nDetails:\n", style="bold #93c5fd")
+            for detail in self._state.last_tool_details[:12]:
+                detail_text.append(f"  - {self._format_tool_detail_line(detail)}\n", style="#93c5fd")
+            if len(self._state.last_tool_details) > 12:
+                detail_text.append(
+                    f"  - ... {len(self._state.last_tool_details) - 12} more detail items\n",
+                    style="dim #71717a",
+                )
+            group.append(detail_text)
         
         if self._state.last_warnings:
             w_text = Text(f"\nWarnings ({len(self._state.last_warnings)}):\n", style="bold #fbbf24")
@@ -1042,7 +1767,12 @@ class MTPApp(App):
             group.append(w_text)
             
         from rich.console import Group
-        return Panel(Group(*group), title=f"[bold #a78bfa]Tool Events ({len(self._state.last_tool_events)})[/]", border_style="#3f3f46")
+        detail_suffix = " + details" if self._show_tool_details and self._state.last_tool_details else ""
+        return Panel(
+            Group(*group),
+            title=f"[bold #a78bfa]Tool Events ({len(self._state.last_tool_events)}){detail_suffix}[/]",
+            border_style="#3f3f46",
+        )
 
     def _build_providers_text(self) -> Any:
         from rich.table import Table
@@ -1070,6 +1800,8 @@ class MTPApp(App):
         self._refresh_sidebar()
 
     def action_clear_chat(self) -> None:
+        self._clear_pending_turn_display()
+        self._reset_live_preview()
         self.query_one("#chat-log", ChatLog).clear()
 
     def action_cycle_sandbox(self) -> None:

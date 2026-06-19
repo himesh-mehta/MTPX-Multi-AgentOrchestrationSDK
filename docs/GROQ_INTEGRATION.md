@@ -9,7 +9,7 @@ It supports:
 - converting Groq `tool_calls` into MTP `ExecutionPlan`
 - sending tool results back as `role="tool"` messages with `tool_call_id`
 - multi-round execution support via `Agent.run_loop(max_rounds=N)`
-- optional strict dependency guidance (`strict_dependency_mode=True`)
+- native tool-call dependency normalization
 - optional reasoning controls (`include_reasoning`, `reasoning_format`, `reasoning_effort`)
 - streaming usage capture (`stream_options.include_usage`) for richer debug metrics
 
@@ -50,8 +50,8 @@ registry.register_tool(
     lambda username: {"repos": ["mtp-core"]},
 )
 
-provider = Groq(strict_dependency_mode=True)
-agent = Agent(provider=provider, tools=registry)
+provider = Groq()
+agent = Agent(provider=provider, tools=registry, strict_dependency_mode=True)
 print(agent.run("List repos for username demo-user"))
 ```
 
@@ -87,4 +87,4 @@ Multi-round chaining is implemented in the core agent loop and works with Groq t
   - improve tool description/schema and system prompt specificity
 
 Related:
-- [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
+- [Storage and Sessions](STORAGE.md)

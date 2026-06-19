@@ -137,9 +137,9 @@ agent = Agent.MTPAgent(provider=provider, tools=registry)
 - Async provider hooks are optional. If omitted, async agent APIs fall back to running sync provider methods in threads.
 
 Related:
-- [Storage and Sessions](C:\Users\prajw\Downloads\MTP\docs\STORAGE.md)
-- [Local Inference](C:\Users\prajw\Downloads\MTP\docs\LOCAL_INFERENCE.md)
-- [Xiaomi MiMo Integration](C:\Users\prajw\Downloads\MTP\docs\XIAOMI_MIMO_INTEGRATION.md)
+- [Storage and Sessions](STORAGE.md)
+- [Local Inference](LOCAL_INFERENCE.md)
+- [Xiaomi MiMo Integration](XIAOMI_MIMO_INTEGRATION.md)
 
 ## Local providers quick reference
 
@@ -181,4 +181,4 @@ Notes:
 - Ensure the model is pulled first (`ollama pull ...`) and the service is running.
 
 Detailed setup and troubleshooting:
-- [Local Inference](C:\Users\prajw\Downloads\MTP\docs\LOCAL_INFERENCE.md)
+- [Local Inference](LOCAL_INFERENCE.md)

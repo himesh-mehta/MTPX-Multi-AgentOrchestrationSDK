@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import Iterator
 from typing import Any
 
 from ..agent import AgentAction, ProviderAdapter
 from ..config import require_env
-from ..protocol import ExecutionPlan, ToolBatch, ToolCall, ToolResult, ToolSpec
+from ..protocol import ExecutionPlan, ToolCall, ToolResult, ToolSpec
 from .common import (
     ProviderCapabilities,
     STRUCTURED_OUTPUT_CLIENT_VALIDATED,
     USAGE_METRICS_RICH,
+    calls_to_dependency_batches,
+    extract_refs,
     extract_usage_metrics,
     format_openai_like_message,
+    normalize_refs,
+    safe_load_arguments,
 )
 
 
@@ -52,75 +55,6 @@ class GroqToolCallingProvider(ProviderAdapter):
         self._last_stream_usage: dict[str, int] | None = None
         self._client = client or self._make_client(api_key=api_key)
 
-    def _extract_refs(self, value: Any) -> list[str]:
-        refs: list[str] = []
-        if isinstance(value, dict):
-            if "$ref" in value and isinstance(value["$ref"], str):
-                refs.append(value["$ref"])
-            for v in value.values():
-                refs.extend(self._extract_refs(v))
-            return refs
-        if isinstance(value, list):
-            for v in value:
-                refs.extend(self._extract_refs(v))
-        return refs
-
-    def _calls_to_dependency_batches(self, calls: list[ToolCall]) -> list[ToolBatch]:
-        remaining: dict[str, ToolCall] = {call.id: call for call in calls}
-        ordered_ids = [call.id for call in calls]
-        done: set[str] = set()
-        batches: list[ToolBatch] = []
-
-        while remaining:
-            ready_ids = [
-                call_id
-                for call_id in ordered_ids
-                if call_id in remaining and all(dep in done for dep in remaining[call_id].depends_on)
-            ]
-            if not ready_ids:
-                # Fallback for malformed/cyclic dependency sets; preserve deterministic execution.
-                unresolved_calls = [remaining[call_id] for call_id in ordered_ids if call_id in remaining]
-                batches.append(ToolBatch(mode="sequential", calls=unresolved_calls))
-                break
-
-            ready_calls = [remaining.pop(call_id) for call_id in ready_ids]
-            mode = "parallel" if len(ready_calls) > 1 else "sequential"
-            batches.append(ToolBatch(mode=mode, calls=ready_calls))
-            done.update(ready_ids)
-
-        return batches
-
-    def _normalize_refs(self, value: Any, id_by_index: dict[int, str], current_idx: int | None = None) -> Any:
-        if isinstance(value, dict):
-            normalized = {}
-            for k, v in value.items():
-                if k == "$ref":
-                    ref_value = v
-                    if isinstance(ref_value, int) and ref_value in id_by_index:
-                        normalized[k] = id_by_index[ref_value]
-                    elif isinstance(ref_value, str) and ref_value.isdigit():
-                        idx = int(ref_value)
-                        normalized[k] = id_by_index.get(idx, ref_value)
-                    elif isinstance(ref_value, str):
-                        match = re.search(r"(\d+)$", ref_value)
-                        if match:
-                            idx = int(match.group(1))
-                            normalized[k] = id_by_index.get(idx, ref_value)
-                        elif ref_value.lower() in ("result", "last", "last_call", "prev", "previous"):
-                            # If we know the current call index, default to the previous one
-                            target_idx = current_idx - 1 if current_idx is not None else 0
-                            normalized[k] = id_by_index.get(max(0, target_idx), ref_value)
-                        else:
-                            normalized[k] = ref_value
-                    else:
-                        normalized[k] = ref_value
-                else:
-                    normalized[k] = self._normalize_refs(v, id_by_index, current_idx)
-            return normalized
-        if isinstance(value, list):
-            return [self._normalize_refs(v, id_by_index, current_idx) for v in value]
-        return value
-
     def _make_client(self, api_key: str | None) -> Any:
         try:
             from groq import Groq
@@ -130,7 +64,27 @@ class GroqToolCallingProvider(ProviderAdapter):
             ) from exc
 
         key = api_key or require_env("GROQ_API_KEY")
-        return Groq(api_key=key)
+        return Groq(api_key=key, timeout=60.0)
+
+    def _create_completion(self, request_args: dict[str, Any]) -> Any:
+        try:
+            return self._client.chat.completions.create(**request_args)
+        except TypeError:
+            request_args.pop("parallel_tool_calls", None)
+            request_args.pop("stream_options", None)
+            return self._client.chat.completions.create(**request_args)
+        except Exception as exc:
+            raise RuntimeError(f"Groq API request failed: {exc}") from exc
+
+    @staticmethod
+    def _first_choice_message(response: Any) -> Any:
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise RuntimeError("Groq response did not include any choices.")
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            raise RuntimeError("Groq response choice did not include a message.")
+        return message
 
     def _to_groq_tools(self, tools: list[ToolSpec]) -> list[dict[str, Any]]:
         formatted: list[dict[str, Any]] = []
@@ -208,15 +162,9 @@ class GroqToolCallingProvider(ProviderAdapter):
             request_args["tool_choice"] = self.tool_choice
             request_args["parallel_tool_calls"] = self.parallel_tool_calls
 
-        try:
-            response = self._client.chat.completions.create(**request_args)
-        except TypeError:
-            # Backward compatibility for clients/models that don't support parallel_tool_calls param.
-            request_args.pop("parallel_tool_calls", None)
-            response = self._client.chat.completions.create(**request_args)
+        response = self._create_completion(request_args)
         self._last_response = response
-        choice = response.choices[0]
-        message = choice.message
+        message = self._first_choice_message(response)
         tool_calls = getattr(message, "tool_calls", None)
         reasoning = getattr(message, "reasoning", None)
         usage = extract_usage_metrics(response)
@@ -226,67 +174,96 @@ class GroqToolCallingProvider(ProviderAdapter):
         if reasoning:
             action_meta["reasoning"] = reasoning
 
+        content = message.content or ""
         if tool_calls:
-            mtp_calls: list[ToolCall] = []
-            serialized_tool_calls: list[dict[str, Any]] = []
-            parsed_calls: list[tuple[int, str, str, dict[str, Any]]] = []
-            id_by_index: dict[int, str] = {}
-            call_reasoning: str | None = None
-            if isinstance(reasoning, str) and reasoning.strip():
-                call_reasoning = reasoning.strip()
-            elif isinstance(message.content, str) and message.content.strip():
-                call_reasoning = message.content.strip()
-
-            for idx, tc in enumerate(tool_calls):
-                fn_name = tc.function.name
-                raw_args = tc.function.arguments or "{}"
-                call_id = tc.id or f"call_{idx}"
-                id_by_index[idx] = call_id
-                try:
-                    parsed_args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    parsed_args = {"_raw_arguments": raw_args}
-                parsed_calls.append((idx, call_id, fn_name, parsed_args))
-                serialized_tool_calls.append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": fn_name, "arguments": raw_args},
-                        "reasoning": call_reasoning,
-                    }
-                )
-
-            for idx, call_id, fn_name, parsed_args in parsed_calls:
-                normalized_args = self._normalize_refs(parsed_args, id_by_index, current_idx=idx)
-                depends_on = list(dict.fromkeys(self._extract_refs(normalized_args)))
-                mtp_calls.append(
-                    ToolCall(
-                        id=call_id,
-                        name=fn_name,
-                        arguments=normalized_args,
-                        depends_on=depends_on,
-                        reasoning=call_reasoning,
-                    )
-                )
-
-            plan = ExecutionPlan(
-                batches=self._calls_to_dependency_batches(mtp_calls),
-                metadata={"provider": "groq", "model": self.model},
+            return self._tool_action_from_calls(
+                tool_calls=list(tool_calls),
+                content=content,
+                reasoning=reasoning,
+                action_meta=action_meta,
+                tool_call_source="native_tool_calls",
             )
-            return AgentAction(
-                plan=plan,
-                metadata={
-                    **action_meta,
-                    "assistant_tool_message": {
-                        "role": "assistant",
-                        "content": message.content or "",
-                        "tool_calls": serialized_tool_calls,
-                        "reasoning": reasoning,
-                    },
+
+        return AgentAction(response_text=content, metadata=action_meta)
+
+    def _tool_action_from_calls(
+        self,
+        *,
+        tool_calls: list[Any],
+        content: str,
+        reasoning: str | None,
+        action_meta: dict[str, Any],
+        tool_call_source: str,
+    ) -> AgentAction:
+        mtp_calls: list[ToolCall] = []
+        serialized_tool_calls: list[dict[str, Any]] = []
+        parsed_calls: list[tuple[int, str, str, dict[str, Any], str]] = []
+        id_by_index: dict[int, str] = {}
+        call_reasoning = reasoning.strip() if isinstance(reasoning, str) and reasoning.strip() else None
+
+        for idx, tc in enumerate(tool_calls):
+            if isinstance(tc, dict):
+                function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                fn_name = str(function.get("name") or tc.get("name") or "")
+                raw_args_value = function.get("arguments") or tc.get("arguments") or "{}"
+                parsed_args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else None
+                raw_args = raw_args_value if isinstance(raw_args_value, str) else json.dumps(raw_args_value, default=str)
+                call_id = str(tc.get("id") or f"call_{idx}")
+            else:
+                function = getattr(tc, "function", None)
+                fn_name = getattr(function, "name", "")
+                raw_args = getattr(function, "arguments", None) or "{}"
+                parsed_args = None
+                call_id = getattr(tc, "id", None) or f"call_{idx}"
+            if not fn_name:
+                raise RuntimeError(f"Groq tool call {call_id!r} is missing a function name.")
+            id_by_index[idx] = call_id
+            if parsed_args is None:
+                parsed_args = safe_load_arguments(raw_args)
+            parsed_calls.append((idx, call_id, fn_name, parsed_args, raw_args))
+            serialized_tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": fn_name, "arguments": raw_args},
+                    "reasoning": call_reasoning,
+                }
+            )
+
+        for idx, call_id, fn_name, parsed_args, _raw_args in parsed_calls:
+            normalized_args = normalize_refs(parsed_args, id_by_index, current_idx=idx)
+            depends_on = list(dict.fromkeys(extract_refs(normalized_args)))
+            mtp_calls.append(
+                ToolCall(
+                    id=call_id,
+                    name=fn_name,
+                    arguments=normalized_args,
+                    depends_on=depends_on,
+                    reasoning=call_reasoning,
+                )
+            )
+
+        plan = ExecutionPlan(
+            batches=calls_to_dependency_batches(mtp_calls),
+            metadata={"provider": "groq", "model": self.model},
+        )
+        derived_batch_modes = [batch.mode for batch in plan.batches]
+        return AgentAction(
+            plan=plan,
+            metadata={
+                **action_meta,
+                "tool_call_source": tool_call_source,
+                "raw_tool_call_count": len(tool_calls),
+                "derived_batch_count": len(plan.batches),
+                "derived_batch_modes": derived_batch_modes,
+                "assistant_tool_message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": serialized_tool_calls,
+                    "reasoning": reasoning,
                 },
-            )
-
-        return AgentAction(response_text=message.content or "", metadata=action_meta)
+            },
+        )
 
     def finalize(self, messages: list[dict[str, Any]], tool_results: list[ToolResult]) -> str:
         groq_messages = self._to_groq_messages(messages)
@@ -301,11 +278,10 @@ class GroqToolCallingProvider(ProviderAdapter):
             request_args["reasoning_format"] = self.reasoning_format
         if self.reasoning_effort is not None:
             request_args["reasoning_effort"] = self.reasoning_effort
-        response = self._client.chat.completions.create(**request_args)
+        response = self._create_completion(request_args)
         self._last_response = response
         self._last_finalize_usage = extract_usage_metrics(response) or None
-        choice = response.choices[0]
-        message = choice.message
+        message = self._first_choice_message(response)
         if getattr(message, "tool_calls", None):
             return "Model requested an additional tool round; multi-round chaining is next on roadmap."
         return message.content or "Done."
@@ -326,11 +302,7 @@ class GroqToolCallingProvider(ProviderAdapter):
             request_args["reasoning_format"] = self.reasoning_format
         if self.reasoning_effort is not None:
             request_args["reasoning_effort"] = self.reasoning_effort
-        try:
-            stream = self._client.chat.completions.create(**request_args)
-        except TypeError:
-            request_args.pop("stream_options", None)
-            stream = self._client.chat.completions.create(**request_args)
+        stream = self._create_completion(request_args)
         for chunk in stream:
             chunk_usage = extract_usage_metrics(chunk)
             if chunk_usage:
